@@ -324,6 +324,70 @@ fn symbolReferences(
     return builder.locations;
 }
 
+
+/// The building of necessary data (build config) is made asynchronously,
+/// the code does not wait for it,
+/// for the general philosophy of client calls, and receives answer immediately, 
+/// does not block and if needed retries.
+/// This is applied in the deeper code in getAssociatedBuildFile() in:
+///
+///  1) getAssociatedBuildFile -> collectPotentialBuildFiles -> getOrLoadBuildFile -> invalidateBuildFile -> async invalidateBuildFileWorker
+///      this starts the build runner that starts the job of populating the build file struct's config field, among other things
+///
+///  Then later
+///
+///  2) getAssociatedBuildFile -> isAssociatedWith -> tryLockConfig
+///      this checks if the config is ready and returns it, or returns null if it is not
+///      as the job is done in async, it does not wait for it to finish
+///      and returns imidiately.
+///
+///  For other cases this behavior might be desired, but it is not here.
+///  This fails the reference finding if it is called for the first time since startup.
+///  As the behavior of failing upon the search is very undesirable for reference search,
+///      (for example when using lsp rename, we do not want it not to find some references) 
+///  when the call failed due to being too early, it should retry.
+///  The original dev even placed here a comment stating that it should wait and retry upon receiving .unresolved.
+///  It cannot be placed deeper down the calls because the getAssociatedBuildFile()
+///  is called by many other functions.
+///  Its core design is to return imidiately and not wait, so other call sites might expect that behavior.
+///  But this one does not, so here is my little fix with the help of ai to find this error. 
+/// 
+/// On further investigation:
+///     It would be possible to tell the client to retry, but that would require the getAssociatedBuildFile()
+///     and further functions to know that the build runner is not ready yet but will be.
+///     It would return a proper error then gatherWorkspaceReferenceCandidates() would return it instead of an empty hashmap like it is now.
+///     Then symbolReferences() would also need to have the error added as return type.
+///     referencesHandler() already has server errors as return type,
+///     but unfortunately there is no LSP-standard "not ready, retry" error code
+///     and clients do not retry references requests on errors anyway. <- information from AI
+///
+///
+///     referencesHandler() -> symbolReferences() -> gatherWorkspaceReferenceCandidates() -> getAssociatedBuildFile() -> ...
+///
+///
+/// /\ My comment /\
+/// =====================================
+/// \/ The doc comment suggested by AI \/
+///
+/// Like `Handle.getAssociatedBuildFile`, but if the build config is not yet
+/// ready (returns `.unresolved`), awaits the pending build runner tasks and
+/// retries once. This is needed for operations like find references where
+/// returning an empty result is worse than blocking briefly.
+///
+/// Most callers of `getAssociatedBuildFile` prefer the non-blocking behavior
+/// and handle `.unresolved` by retrying on the next client request — this
+/// helper is for the cases where that philosophy fails the user.
+fn resolveAssociatedBuildFile(
+    store: *DocumentStore,
+    handle: *DocumentStore.Handle,
+) error{ Canceled, OutOfMemory }!DocumentStore.Handle.AssociatedBuildFile {
+    const result = try handle.getAssociatedBuildFile(store);
+    if (result != .unresolved) return result;
+    // await build runner and retry once
+    try store.wait_group.await(store.io);
+    return handle.getAssociatedBuildFile(store);
+}
+
 fn gatherWorkspaceReferenceCandidates(
     store: *DocumentStore,
     arena: std.mem.Allocator,
@@ -333,8 +397,8 @@ fn gatherWorkspaceReferenceCandidates(
     target_handle: *DocumentStore.Handle,
 ) Analyser.Error!Uri.ArrayHashMap(void) {
     if (DocumentStore.supports_build_system) no_build_file: {
-        const resolved = switch (try root_handle.getAssociatedBuildFile(store)) {
-            .unresolved => return .empty, // this should await instead
+        const resolved = switch (try resolveAssociatedBuildFile(store, root_handle)) {
+            .unresolved => return .empty,
             .none => break :no_build_file,
             .resolved => |resolved| resolved,
         };
