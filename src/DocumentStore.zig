@@ -19,36 +19,255 @@ const TrigramStore = @import("TrigramStore.zig");
 const DocumentStore = @This();
 
 io: std.Io,
-allocator: std.mem.Allocator,
-/// the DocumentStore assumes that `config` is not modified while calling one of its functions.
-config: Config,
-mutex: std.Io.Mutex = .init,
-wait_group: if (supports_build_system) std.Io.Group else void = if (supports_build_system) .init else {},
-handles: Uri.ArrayHashMap(*Handle.Future) = .empty,
-build_files: if (supports_build_system) Uri.ArrayHashMap(*BuildFile) else void = if (supports_build_system) .empty else {},
-cimports: if (supports_build_system) std.array_hash_map.Auto(CImportHash, translate_c.Result) else void = if (supports_build_system) .empty else {},
-diagnostics_collection: *DiagnosticsCollection,
-builds_in_progress: std.atomic.Value(i32) = .init(0),
-transport: ?*lsp.Transport = null,
-lsp_capabilities: struct {
-    supports_work_done_progress: bool = false,
-    supports_semantic_tokens_refresh: bool = false,
-    supports_inlay_hints_refresh: bool = false,
-} = .{},
+    allocator: std.mem.Allocator,
+    /// the DocumentStore assumes that `config` is not modified while calling one of its functions.
+    config: Config,
+    mutex: std.Io.Mutex = .init,
+    wait_group: if (supports_build_system) std.Io.Group else void = if (supports_build_system) .init else {},
+    handles: Uri.ArrayHashMap(*Handle.Future) = .empty,
+    handles_imported_by: ImportedBy = .empty,
+    build_files: if (supports_build_system) Uri.ArrayHashMap(*BuildFile) else void = if (supports_build_system) .empty else {},
+    cimports: if (supports_build_system) std.array_hash_map.Auto(CImportHash, translate_c.Result) else void = if (supports_build_system) .empty else {},
+    diagnostics_collection: *DiagnosticsCollection,
+    builds_in_progress: std.atomic.Value(i32) = .init(0),
+    transport: ?*lsp.Transport = null,
+    lsp_capabilities: struct {
+        supports_work_done_progress: bool = false,
+        supports_semantic_tokens_refresh: bool = false,
+        supports_inlay_hints_refresh: bool = false,
+    } = .{},
 
-pub const supports_build_system = std.process.can_spawn;
+    pub const supports_build_system = std.process.can_spawn;
 
-pub const Config = struct {
-    environ_map: *const std.process.Environ.Map,
-    zig_exe_path: ?[]const u8,
-    zig_lib_dir: ?std.Build.Cache.Directory,
-    build_runner_path: ?[]const u8,
-    builtin_path: ?[]const u8,
-    global_cache_dir: ?std.Build.Cache.Directory,
-    wasi_preopens: switch (builtin.os.tag) {
-        .wasi => std.process.Preopens,
-        else => void,
-    },
+    pub const Config = struct {
+        environ_map: *const std.process.Environ.Map,
+        zig_exe_path: ?[]const u8,
+        zig_lib_dir: ?std.Build.Cache.Directory,
+        build_runner_path: ?[]const u8,
+        builtin_path: ?[]const u8,
+        global_cache_dir: ?std.Build.Cache.Directory,
+        wasi_preopens: switch (builtin.os.tag) {
+            .wasi => std.process.Preopens,
+            else => void,
+        },
+    };
+
+const ImportedBy = struct {
+    const Entry = struct {
+        importers: Uri.ArrayHashMap(void),
+        file_deleted: bool,
+        const empty = Entry{ .importers = .empty, .file_deleted = false };
+    };
+    const PendingModuleImport = struct {
+        importer_uri: Uri,
+        module_name: []const u8,
+    };
+    map: Uri.ArrayHashMap(Entry),
+    module_dictionary: std.StringHashMapUnmanaged(Uri),
+
+    mutex: std.Io.Mutex,
+
+    pending_module_imports: ?std.ArrayList(PendingModuleImport), 
+
+    pub const empty = ImportedBy{ 
+        .map = .empty,
+        .module_dictionary = .empty,
+        .mutex = .init,
+        .pending_module_imports = .empty,
+    };
+
+    fn deinit(self: *ImportedBy, allocator: std.mem.Allocator) void {
+        self.module_dictionary.deinit(allocator);
+
+        for (self.map.keys(), self.map.values()) |key_uri, *entry| {
+            entry.importers.deinit(allocator);
+            key_uri.deinit(allocator);
+        }
+        self.map.deinit(allocator);
+
+
+    }
+    fn addPendingModuleImport(self: *ImportedBy, allocator: std.mem.Allocator, io: std.Io, importer_uri: Uri, module_name: []const u8) error{OutOfMemory}!void {
+        if (self.pending_module_imports) |*list| {
+            self.mutex.lockUncancelable(io);
+            try list.append(allocator, .{ .importer_uri = try importer_uri.dupe(allocator), .module_name = module_name });
+            self.mutex.unlock(io);
+        }
+    }
+    fn resolvePendingModuleImports(self: *ImportedBy, allocator: std.mem.Allocator, io: std.Io, store: *DocumentStore) error{OutOfMemory}!void {
+        if (self.pending_module_imports) |*list| {
+            while (list.pop()) |pending_import| {
+
+                defer pending_import.importer_uri.deinit(allocator);
+
+                const module_uri = self.module_dictionary.get(pending_import.module_name);
+                if (module_uri == null) continue;
+
+
+                self.mutex.lockUncancelable(io);
+                try self.registerImporter(allocator, module_uri.?, pending_import.importer_uri);
+                self.mutex.unlock(io);
+
+                const handle = store.getHandle(pending_import.importer_uri);
+                if (handle) |hand| {
+                    store.mutex.lockUncancelable(io);
+                    try hand.file_imports.put(allocator, try module_uri.?.dupe(allocator), {});
+                    store.mutex.unlock(io);
+                }
+            }
+
+        }
+    }
+    fn registerModule(self: *ImportedBy, allocator: std.mem.Allocator, module_name: []const u8, module_path: []const u8) error{OutOfMemory}!void {
+        const module_name_owned = try allocator.dupe(u8, module_name);
+        try self.module_dictionary.put(allocator, module_name_owned, try Uri.fromPath(allocator, module_path));
+    }
+    fn unregisterModule(self: *ImportedBy, allocator: std.mem.Allocator, module_name: []const u8) void {
+        const entry = self.module_dictionary.fetchRemove(module_name).?;
+        allocator.free(entry.key);
+    }
+    fn registerImporter(self: *ImportedBy, allocator: std.mem.Allocator, imported_uri: Uri, importer_uri: Uri) error{OutOfMemory}!void {
+
+        try self.map.ensureUnusedCapacity(allocator, 2);
+
+        const import_gop = self.map.getOrPutAssumeCapacity(imported_uri);
+        if (!import_gop.found_existing) {
+            import_gop.key_ptr.* = try imported_uri.dupe(allocator);
+            import_gop.value_ptr.* = .empty;
+        }
+        const importer_gop = self.map.getOrPutAssumeCapacity(importer_uri);
+        if (!importer_gop.found_existing) {
+            importer_gop.key_ptr.* = try importer_uri.dupe(allocator);
+            importer_gop.value_ptr.* = .empty;
+        }
+        const importer_uri_owned = importer_gop.key_ptr.*;
+        const entry = import_gop.value_ptr;
+        try entry.importers.put(allocator, importer_uri_owned, {});
+
+        ////////
+
+        // if (!self.map.contains(import_uri)) {
+        //     const duped_import_uri = try import_uri.dupe(allocator);
+        //     errdefer duped_import_uri.deinit(allocator);
+        //     try self.map.put(allocator, duped_import_uri, .empty);
+        // }
+        //
+        // if (!self.map.contains(importer_uri)) {
+        //     const duped_importer_uri = try importer_uri.dupe(allocator);
+        //     errdefer duped_importer_uri.deinit(allocator);
+        //     try self.map.put(allocator, duped_importer_uri, .empty);
+        // }
+        // const importer_uri_owned = self.map.getKey(importer_uri).?;
+        //
+        // const entry = self.map.getPtr(import_uri).?;
+        // try entry.importers.put(allocator, importer_uri_owned, {});
+
+    }
+    fn unregisterImporter(self: *ImportedBy, allocator: std.mem.Allocator, import_uri: Uri, importer_uri: Uri) void {
+
+        std.debug.print("unregisterImporter triggered. import_uri: {s} imorter_uri: | ", .{ import_uri.raw });
+
+        const index = self.map.getIndex(import_uri).?;
+        const entry = &self.map.values()[index];
+
+        _ = entry.importers.swapRemove(importer_uri);
+
+        if (entry.file_deleted == true and entry.importers.count() == 0) {
+            entry.importers.deinit(allocator);
+
+            const import_uri_owned = self.map.keys()[index];
+            import_uri_owned.deinit(allocator);
+
+            self.map.swapRemoveAt(index);
+        }
+    }
+    fn loopOver(self: *ImportedBy, allocator: std.mem.Allocator, longer: *Handle, comptime longer_is_old: bool, shorter: *Handle) !void {
+
+        const longer_imports = longer.file_imports.keys();
+        const shorter_imports = shorter.file_imports.keys();
+
+        var short_i: usize = 0;
+        for (0..longer_imports.len) |longer_i| {
+
+            const shorter_in_bounds: bool = short_i < shorter_imports.len;
+
+            if (shorter_in_bounds) {
+                if (longer_imports[longer_i].eql(shorter_imports[short_i])) {
+                    short_i += 1;
+                    continue;
+                }
+
+                if (!longer.file_imports.contains(shorter_imports[short_i])) {
+                    if (longer_is_old) {
+                        try self.registerImporter(allocator, shorter_imports[short_i], shorter.uri);
+                    } else {
+                        std.debug.print("calling unregisterImporter from loop over shorter_in_bounds | ", .{});
+                        self.unregisterImporter(allocator, shorter_imports[short_i], shorter.uri);
+                    }
+                }
+                short_i += 1;
+            }
+
+            if (!shorter.file_imports.contains(longer_imports[longer_i])) {
+                if (longer_is_old) {
+                    std.debug.print("calling unregisterImporter from loop over longer_imports | ", .{});
+                    self.unregisterImporter(allocator, longer_imports[longer_i], longer.uri);
+                } else {
+                    try self.registerImporter(allocator, longer_imports[longer_i], longer.uri);
+                }
+
+            }
+        }
+    }
+    fn update(self: *ImportedBy, allocator: std.mem.Allocator, io: std.Io, old_handle: *Handle, new_handle: *Handle) error{ OutOfMemory, Canceled }!void {
+
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
+
+        // if (old_handle.file_imports.count() > new_handle.file_imports.count()) {
+        //     std.debug.print("old handle has more imports that new", .{});
+        // } else if (old_handle.file_imports.count() < new_handle.file_imports.count()) {
+        //     std.debug.print("new handle has more imports that old", .{});
+        // } else {
+        //     std.debug.print("old handle and new handle have the same amount of imports", .{});
+        // }
+
+        if (old_handle.file_imports.count() > new_handle.file_imports.count()) {
+            std.debug.print("loopOver new handle | ", .{});
+            try self.loopOver(allocator, old_handle, true, new_handle);
+        } else {
+            std.debug.print("loopOver old handle | ", .{});
+            try self.loopOver(allocator, new_handle, false, old_handle);
+        }
+    }
+
+    fn onFileDeleted(self: *ImportedBy, handle: *Handle, allocator: std.mem.Allocator, io: std.Io) std.Io.Cancelable!bool {
+
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
+
+        for (handle.file_imports.keys()) |import_uri| {
+            std.debug.print("calling unregisterImporter from onFileDeleted | ", .{});
+            self.unregisterImporter(allocator, import_uri, handle.uri);
+        }
+
+        const index = self.map.getIndex(handle.uri).?;
+        const entry = &self.map.values()[index];
+
+        if (entry.importers.count() != 0) {
+            entry.file_deleted = true;
+            return false;
+
+        } else {
+            entry.importers.deinit(allocator);
+            const handle_uri_owned = self.map.keys()[index];
+
+            self.map.swapRemoveAt(index);
+
+            handle_uri_owned.deinit(allocator);
+            return true;
+        }
+    }
 };
 
 /// Represents a `build.zig`
@@ -143,8 +362,9 @@ pub const BuildFile = struct {
 
                 const handle = try store.getOrLoadHandle(source_uri) orelse continue;
 
-                try found_uris.ensureUnusedCapacity(arena, handle.file_imports.len);
-                for (handle.file_imports) |import_uri| found_uris.putAssumeCapacity(try import_uri.dupe(arena), {});
+                try found_uris.ensureUnusedCapacity(arena, handle.file_imports.count());
+
+                for (handle.file_imports.keys()) |import_uri| found_uris.putAssumeCapacity(try import_uri.dupe(arena), {});
             }
         }
 
@@ -163,8 +383,9 @@ pub const BuildFile = struct {
 pub const Handle = struct {
     uri: Uri,
     tree: Ast,
-    /// List of every file that has been `@Import`ed. Does not include imported modules.
-    file_imports: []const Uri,
+    /// List of every file that has been `@Import`ed. Imported modules are resolved to their root source file.
+    file_imports: Uri.ArrayHashMap(void),
+
     /// Contains one entry for every `@cImport` in the document
     cimports: std.MultiArrayList(CImportHandle),
     /// `true` if the document has been directly opened by the client i.e. with `textDocument/didOpen`
@@ -411,6 +632,7 @@ pub const Handle = struct {
         text: [:0]const u8,
         allocator: std.mem.Allocator,
     ) error{OutOfMemory}!void {
+
         const tracy_zone = tracy.traceNamed(@src(), "Handle.refresh");
         defer tracy_zone.end();
 
@@ -418,7 +640,7 @@ pub const Handle = struct {
         var new_tree = try parseTree(allocator, text, mode);
         errdefer new_tree.deinit(allocator);
 
-        var new_file_imports: std.ArrayList(Uri) = .empty;
+        var new_file_imports: Uri.ArrayHashMap(void) = .empty;
         errdefer new_file_imports.deinit(allocator);
 
         var new_cimports: std.MultiArrayList(CImportHandle) = .empty;
@@ -431,14 +653,11 @@ pub const Handle = struct {
 
         try collectImports(
             allocator,
-            handle.uri,
+            handle,
             &new_tree,
             &new_file_imports,
             &new_cimports,
         );
-
-        const file_imports = try new_file_imports.toOwnedSlice(allocator);
-        errdefer file_imports.deinit(allocator);
 
         errdefer comptime unreachable;
 
@@ -448,9 +667,11 @@ pub const Handle = struct {
         }
         old_handle.cimports = handle.cimports;
 
+        old_handle.uri = handle.uri;
+
         handle.tree = new_tree;
         old_handle.file_imports = handle.file_imports;
-        handle.file_imports = file_imports;
+        handle.file_imports = new_file_imports;
         handle.cimports = new_cimports;
         handle.impl.has_tree_and_source = true;
 
@@ -458,6 +679,7 @@ pub const Handle = struct {
         handle.document_scope = .unset;
         old_handle.trigram_store = handle.trigram_store;
         handle.trigram_store = .unset;
+
     }
 
     fn parseTree(allocator: std.mem.Allocator, new_text: [:0]const u8, mode: Ast.Mode) error{OutOfMemory}!Ast {
@@ -481,11 +703,13 @@ pub const Handle = struct {
 
     fn collectImports(
         allocator: std.mem.Allocator,
-        uri: Uri,
+        handle: *Handle,
         tree: *const Ast,
-        file_imports: *std.ArrayList(Uri),
+        file_imports: *Uri.ArrayHashMap(void),
         cimports: *std.MultiArrayList(CImportHandle),
     ) error{OutOfMemory}!void {
+        const uri = handle.uri;
+
         const tracy_zone = tracy.trace(@src());
         defer tracy_zone.end();
 
@@ -516,10 +740,25 @@ pub const Handle = struct {
                 var import_string = offsets.tokenToSlice(tree, tree.nodeMainToken(params[0]));
                 import_string = import_string[1 .. import_string.len - 1];
 
-                if (!std.mem.endsWith(u8, import_string, ".zig")) continue;
+                if (!std.mem.endsWith(u8, import_string, ".zig")) {
+                    std.debug.print("registering module import: {s} | ", .{ import_string });
+                    const module_uri = handle.impl.store.handles_imported_by.module_dictionary.get(import_string);
+                    if (module_uri) |mod_uri| {
+                        std.debug.print("found module name in dictionary: {s} | ", .{ mod_uri.raw });
+                        std.debug.print("handle: {s} imports module: {s} | ", .{ handle.uri.raw, mod_uri.raw });
+                        file_imports.putAssumeCapacity(try mod_uri.dupe(allocator), {});
+                        handle.impl.store.handles_imported_by.mutex.lock(handle.impl.store.io) catch {};
+                        try handle.impl.store.handles_imported_by.registerImporter(allocator, mod_uri, handle.uri);
+                        handle.impl.store.handles_imported_by.mutex.unlock(handle.impl.store.io);
+                    } else {
+                        std.debug.print("did not find module_imports entry for {s} | ", .{ import_string });
+                        try handle.impl.store.handles_imported_by.addPendingModuleImport(allocator, handle.impl.store.io, handle.uri, import_string);
+                    }
+                    continue;
+                }
 
                 const import_uri = try Uri.resolveImport(allocator, uri, parsed_uri, import_string);
-                file_imports.appendAssumeCapacity(import_uri);
+                file_imports.putAssumeCapacity(import_uri, {});
                 continue;
             }
 
@@ -548,7 +787,7 @@ pub const Handle = struct {
     const dead: Handle = .{
         .uri = undefined,
         .tree = undefined,
-        .file_imports = &.{},
+        .file_imports = .empty,
         .cimports = .empty,
         .lsp_synced = undefined,
         .impl = .{
@@ -569,8 +808,9 @@ pub const Handle = struct {
         }
         self.document_scope.deinit(allocator);
         self.trigram_store.deinit(allocator);
-        for (self.file_imports) |uri| uri.deinit(allocator);
-        allocator.free(self.file_imports);
+
+        for (self.file_imports.keys()) |uri| uri.deinit(allocator);
+        self.file_imports.deinit(allocator);
 
         for (self.cimports.items(.source)) |source| allocator.free(source);
         self.cimports.deinit(allocator);
@@ -706,6 +946,9 @@ pub fn deinit(self: *DocumentStore) void {
     }
     self.handles.deinit(self.allocator);
 
+    self.handles_imported_by.deinit(self.allocator);
+
+
     if (supports_build_system) {
         for (self.build_files.values()) |build_file| {
             build_file.deinit(self.allocator);
@@ -789,7 +1032,7 @@ pub fn getOrLoadHandle(self: *DocumentStore, uri: Uri) error{ Canceled, OutOfMem
             .override = false,
             .load_build_file_behaviour = .never,
         },
-    ) catch |err| switch (err) {
+        ) catch |err| switch (err) {
         error.Canceled, error.OutOfMemory => |e| return e,
         else => return null,
     };
@@ -856,7 +1099,7 @@ pub fn openLspSyncedDocument(self: *DocumentStore, uri: Uri, text: []const u8) e
             .override = true,
             .load_build_file_behaviour = .load_but_dont_update,
         },
-    ) catch |err| switch (err) {
+        ) catch |err| switch (err) {
         error.Canceled, error.OutOfMemory => |e| return e,
         else => unreachable,
     };
@@ -911,7 +1154,7 @@ pub fn refreshLspSyncedDocument(self: *DocumentStore, uri: Uri, new_text: [:0]co
             .override = true,
             .load_build_file_behaviour = .only_update,
         },
-    ) catch |err| switch (err) {
+        ) catch |err| switch (err) {
         error.Canceled, error.OutOfMemory => |e| return e,
         else => unreachable,
     };
@@ -927,6 +1170,7 @@ pub fn refreshDocumentFromFileSystem(self: *DocumentStore, uri: Uri, should_dele
         const index = self.handles.getIndex(uri) orelse return false;
         const handle_future = self.handles.values()[index];
         const handle = handle_future.await(self.io) catch return false;
+        _ = try self.handles_imported_by.onFileDeleted(handle, self.allocator, self.io);
         if (handle.lsp_synced) return false;
         self.handles.swapRemoveAt(index);
         handle.uri.deinit(self.allocator);
@@ -945,7 +1189,7 @@ pub fn refreshDocumentFromFileSystem(self: *DocumentStore, uri: Uri, should_dele
                 .override = true,
                 .load_build_file_behaviour = .only_update,
             },
-        ) catch |err| switch (err) {
+            ) catch |err| switch (err) {
             error.Canceled, error.OutOfMemory => |e| return e,
             else => return false,
         };
@@ -1127,7 +1371,7 @@ fn notifyBuildStart(self: *DocumentStore) void {
         .params = lsp.types.window.work_done_progress.CreateParams{
             .token = .{ .string = progress_token },
         },
-    }) catch |err| switch (err) {
+        }) catch |err| switch (err) {
         error.Canceled => comptime unreachable,
         else => |e| {
             log.err("Failed to send create work message: {}", .{e});
@@ -1143,8 +1387,8 @@ fn notifyBuildStart(self: *DocumentStore) void {
             .value = lsp.types.window.work_done_progress.Begin{
                 .title = "Loading build configuration",
             },
-        },
-    }) catch |err| switch (err) {
+            },
+        }) catch |err| switch (err) {
         error.Canceled => comptime unreachable,
         else => |e| {
             log.err("Failed to send progress start message: {}", .{e});
@@ -1179,14 +1423,229 @@ fn notifyBuildEnd(self: *DocumentStore, status: EndStatus) void {
             .value = lsp.types.window.work_done_progress.End{
                 .message = message,
             },
-        },
-    }) catch |err| switch (err) {
+            },
+        }) catch |err| switch (err) {
         error.Canceled => comptime unreachable,
         else => |e| {
             log.err("Failed to send progress end message: {}", .{e});
             return;
         },
     };
+}
+
+
+/// There is no need to deinit source_file_uri by the caller, after this function returns,
+/// the uri passed in the argument will be deinited.
+///
+/// Because the inputed source uri is placed inside the found_uris map,
+/// it will be deinited with the rest of the uris.
+fn collectImportsInModule(self: *DocumentStore, allocator: std.mem.Allocator, source_file_uri: Uri) ReadFileError!void {
+
+    var found_uris: Uri.ArrayHashMap(void) = .empty;
+    defer {
+        for (found_uris.keys()) |uri| {
+            uri.deinit(allocator);
+        }
+        found_uris.deinit(allocator);
+    } 
+    // Because this function has to guarantee that the source_file_uri will be deinited,
+    // it needs to be deinited manually if putting it inside found_uris fails.
+    found_uris.put(allocator, source_file_uri, {}) catch |err| {
+        source_file_uri.deinit(allocator);
+        return err;
+    };
+
+    var i: usize = 0;
+    while (i < found_uris.count()) : ( i += 1 ) {
+        const file_uri = found_uris.keys()[i];
+
+        const file_contents = try self.readFile(file_uri);
+        defer allocator.free(file_contents);
+
+        const parsed_uri = source_file_uri.toStdUri();
+
+        var tokenizer = std.zig.Tokenizer.init(file_contents);
+        while (true) {
+            const token = tokenizer.next();
+            switch (token.tag) {
+                .eof => break,
+                .builtin => {
+                    const text = file_contents[token.loc.start..token.loc.end];
+                    if (!std.mem.eql(u8, text, "@import")) continue;
+
+                    const left_parenthesis = tokenizer.next();
+                    if (left_parenthesis.tag != .l_paren) continue;
+
+                    const string = tokenizer.next();
+                    if (string.tag != .string_literal) continue;
+
+                    const right_parenthesis = tokenizer.next();
+                    if (right_parenthesis.tag != .r_paren) continue;
+
+                    // Strip quotes at both sides.
+                    const import_path = file_contents[string.loc.start + 1..string.loc.end - 1];
+
+                    if (!std.mem.endsWith(u8, import_path, ".zig")) continue;
+
+                    const import_uri = try Uri.resolveImport(allocator, file_uri, parsed_uri, import_path);
+                    try found_uris.put(allocator, import_uri, {});
+
+                    try self.handles_imported_by.registerImporter(allocator, import_uri, file_uri);
+                },
+                else => continue,
+            }
+        }
+    }
+
+}
+
+const InternalOrExternal = enum {
+    internal, external,
+};
+fn clasifyModule(build_file_uri: Uri, module_path: []const u8) InternalOrExternal {
+    // file:///path/to/file
+    // I do not want to use allocator to turn the uri to path here as that would require to return an error here and pass it
+    // down through functions. as uri is always the same: file:// + path, it is safe to just take a slice from just the path
+    const build_file_path = build_file_uri.raw[7..];
+
+    // for dirname to return null here, the build file would need to be directly in the root directory
+    // as that will never happen in the actual project, I decided to place orelse unreachable here
+    const project_root = std.Io.Dir.path.dirname(build_file_path) orelse unreachable;
+    if (std.mem.startsWith(u8, module_path, project_root)) {
+        return .internal;
+    } else {
+        return .external;
+    }
+}
+
+fn loopOverImportTable(
+    self: *DocumentStore,
+    allocator: std.mem.Allocator,
+    imported_by: *ImportedBy,
+    build_file_uri: Uri,
+    longer: *const std.StringArrayHashMapUnmanaged([]const u8),
+    comptime longer_is_old: bool,
+    shorter: *const std.StringArrayHashMapUnmanaged([]const u8),
+) ReadFileError!void {
+    const short_keys = shorter.keys();
+    const short_values = shorter.values();
+    var short_i: usize = 0;
+    for (longer.keys(), longer.values()) |module_name, module_path| {
+
+        const shorter_in_bounds: bool = short_i < short_keys.len;
+
+        if (shorter_in_bounds) {
+            if (std.mem.eql(u8, module_name, short_keys[short_i])) {
+                short_i += 1;
+                continue;
+            }
+
+            if (!longer.contains(short_keys[short_i])) {
+
+                if (longer_is_old) {
+                    imported_by.registerModule(allocator, short_keys[short_i], short_values[short_i]) catch |err| {
+                        log.err("Failed to register module {s} with path {s} in dictionary (error: {})", .{
+                            short_keys[short_i], short_values[short_i], err });
+                        };
+                } else {
+                    imported_by.unregisterModule(allocator, short_keys[short_i]);
+                }
+
+
+                const clasified = clasifyModule(build_file_uri, short_values[short_i]);
+                switch (clasified) {
+                    .internal => {},
+                    .external => {
+                        const module_source_uri = try Uri.fromPath(allocator, module_path);
+
+                        try collectImportsInModule(self, allocator, module_source_uri);
+                    },
+                }
+
+            }
+
+            short_i += 1;
+        }
+
+        if (!shorter.contains(module_name)) {
+
+            if (longer_is_old) {
+                imported_by.unregisterModule(allocator, module_name);
+            } else {
+                imported_by.registerModule(allocator, module_name, module_path) catch |err| {
+                    log.err("Failed to register module {s} with path {s} in dictionary (error: {})", .{
+                        module_name, module_path, err });
+                    };
+            }
+            const clasified = clasifyModule(build_file_uri, module_path);
+            switch (clasified) {
+                .internal => {},
+                .external => {
+                    const module_source_uri = try Uri.fromPath(allocator, module_path);
+
+                    try collectImportsInModule(self, allocator, module_source_uri);
+                },
+            }
+        }
+    }
+}
+
+fn updateModules(
+    self: *DocumentStore,
+    allocator: std.mem.Allocator,
+    imported_by: *ImportedBy,
+    build_file_uri: Uri,
+    longer: *const std.StringArrayHashMapUnmanaged(BuildConfig.Module),
+    comptime longer_is_old: bool,
+    shorter: *const std.StringArrayHashMapUnmanaged(BuildConfig.Module)
+) ReadFileError!void {
+
+    const short_keys = shorter.keys();
+    const short_values = shorter.values();
+
+    //the entries in the module imports dictionary are only needed for resolving module imports, so if nothing imports a module, there is no need to place it in the dictionary
+    var short_i: usize = 0;
+    for (longer.values()) |*module| {
+
+        const shorter_in_bounds: bool = short_i < short_keys.len;
+
+        if (shorter_in_bounds) {
+
+            if (module.import_table.map.count() > short_values[short_i].import_table.map.count()) {
+                try loopOverImportTable(
+                    self,
+                    allocator,
+                    imported_by, 
+                    build_file_uri,
+                    &module.import_table.map,
+                    if (longer_is_old) true else false,
+                    &short_values[short_i].import_table.map,
+                );
+            } else {
+                try loopOverImportTable(
+                    self,
+                    allocator,
+                    imported_by,
+                    build_file_uri,
+                    &short_values[short_i].import_table.map,
+                    if (longer_is_old) false else true,
+                    &module.import_table.map,
+                );
+            }
+
+            short_i += 1;
+        }
+
+        try loopOverImportTable(
+            self,
+            allocator,
+            imported_by,
+            build_file_uri,
+            &module.import_table.map,
+            if (longer_is_old) true else false, 
+            &.empty
+        );
+    }
 }
 
 fn invalidateBuildFileWorker(self: *DocumentStore, build_file: *BuildFile) std.Io.Cancelable!void {
@@ -1236,6 +1695,36 @@ fn invalidateBuildFileWorker(self: *DocumentStore, build_file: *BuildFile) std.I
                 build_file.impl.build_runner_state = .idle;
                 build_file.impl.mutex.unlock(self.io);
 
+
+                if (old_config) |old| {
+
+                    if (old.value.modules.map.count() > build_config.value.modules.map.count()) {
+                        updateModules(self, self.allocator, &self.handles_imported_by, build_file.uri,
+                            &old.value.modules.map, true, &build_config.value.modules.map) catch |err| switch (err) {
+                            error.Canceled => return error.Canceled,
+                            else => {
+                                log.err("Error while collecting imports from modules: {any}", .{ err });
+                            },
+                        };
+                    } else {
+                        updateModules(self, self.allocator, &self.handles_imported_by, build_file.uri,
+                            &build_config.value.modules.map, false, &old.value.modules.map) catch |err| switch (err) {
+                            error.Canceled => return error.Canceled,
+                            else => {
+                                log.err("Error while collecting imports from modules: {any}", .{ err });
+                            },
+                        };
+                    }
+                } else {
+                    updateModules(self, self.allocator, &self.handles_imported_by, build_file.uri,
+                        &build_config.value.modules.map, false, &.empty) catch |err| switch (err) {
+                        error.Canceled => return error.Canceled,
+                        else => {
+                            log.err("Error while collecting imports from modules: {any}", .{ err });
+                        },
+                    };
+                }
+
                 if (old_config) |*config| config.deinit();
                 self.notifyBuildEnd(.success);
                 break;
@@ -1261,7 +1750,7 @@ fn invalidateBuildFileWorker(self: *DocumentStore, build_file: *BuildFile) std.I
                     .method = "workspace/semanticTokens/refresh",
                     .params = @as(?void, null),
                 },
-            ) catch |err| switch (err) {
+                ) catch |err| switch (err) {
                 error.Canceled => comptime unreachable,
                 else => {},
             };
@@ -1276,12 +1765,15 @@ fn invalidateBuildFileWorker(self: *DocumentStore, build_file: *BuildFile) std.I
                     .method = "workspace/inlayHint/refresh",
                     .params = @as(?void, null),
                 },
-            ) catch |err| switch (err) {
+                ) catch |err| switch (err) {
                 error.Canceled => comptime unreachable,
                 else => {},
             };
         }
     }
+    self.handles_imported_by.resolvePendingModuleImports(self.allocator, self.io, self) catch |err| {
+        log.err("Error while resolving pending module imports: {any}", .{ err });
+    };
 }
 
 pub fn isBuildFile(uri: Uri) bool {
@@ -1385,16 +1877,16 @@ fn loadBuildConfiguration(self: *DocumentStore, build_file_uri: Uri, build_file_
         const tracy_zone2 = tracy.trace(@src());
         defer tracy_zone2.end();
         break :blk try std.process.run(
-            self.allocator,
-            self.io,
-            .{
-                .argv = args,
-                .cwd = .{ .path = cwd },
-                .stderr_limit = .limited(16 * 1024 * 1024),
-                .stdout_limit = .limited(16 * 1024 * 1024),
-            },
-        );
-    };
+                   self.allocator,
+                   self.io,
+                   .{
+                       .argv = args,
+                       .cwd = .{ .path = cwd },
+                       .stderr_limit = .limited(16 * 1024 * 1024),
+                       .stdout_limit = .limited(16 * 1024 * 1024),
+                   },
+                   );
+               };
     defer self.allocator.free(zig_run_result.stdout);
     defer self.allocator.free(zig_run_result.stderr);
 
@@ -1634,14 +2126,14 @@ fn createAndStoreDocument(
             .handle = .{
                 .uri = gop.key_ptr.*,
                 .tree = undefined,
-                .file_imports = &.{},
+                .file_imports = .empty,
                 .cimports = .empty,
                 .lsp_synced = options.lsp_synced,
                 .impl = .{
                     .store = store,
                     .has_tree_and_source = false,
                 },
-            },
+                },
             .err = previous_err,
         };
         break :handle_future gop.value_ptr.*;
@@ -1664,9 +2156,11 @@ fn createAndStoreDocument(
         &handle_future.handle,
         &old_handle,
         text,
-        store.allocator,
+        store.allocator, 
     );
-    old_handle.deinit(store.allocator);
+    defer old_handle.deinit(store.allocator);
+    try store.handles_imported_by.update(store.allocator, store.io, &old_handle, &handle_future.handle);
+
 
     handle_future.err = null;
     return &handle_future.handle;
@@ -1733,16 +2227,16 @@ pub fn collectIncludeDirs(
             for (module.include_dirs) |include_path| {
                 const absolute_path = if (std.Io.Dir.path.isAbsolute(include_path))
                     try allocator.dupe(u8, include_path)
-                else blk: {
-                    const build_file_path = resolved.build_file.uri.toFsPath(allocator) catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        error.UnsupportedScheme => continue,
+                    else blk: {
+                        const build_file_path = resolved.build_file.uri.toFsPath(allocator) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            error.UnsupportedScheme => continue,
+                        };
+                        const build_file_dirname = std.Io.Dir.path.dirname(build_file_path) orelse continue;
+                        break :blk try std.Io.Dir.path.join(allocator, &.{ build_file_dirname, include_path });
                     };
-                    const build_file_dirname = std.Io.Dir.path.dirname(build_file_path) orelse continue;
-                    break :blk try std.Io.Dir.path.join(allocator, &.{ build_file_dirname, include_path });
-                };
 
-                include_dirs.appendAssumeCapacity(absolute_path);
+                    include_dirs.appendAssumeCapacity(absolute_path);
             }
             break :collected_all true;
         },
