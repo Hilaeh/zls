@@ -323,13 +323,11 @@ fn symbolReferences(
              var uris = try gatherWorkspaceReferenceCandidates(
                  analyser.store,
                  analyser.arena,
+                 current_handle,
                  target_symbol.handle,
              );
              for (uris.keys()) |uri| {
                  if (uri.eql(current_handle.uri)) continue;
-                 if (DocumentStore.isInStd(uri)) continue;
-                 if (DocumentStore.isBuiltinFile(uri)) continue;
-                 // is external too...
                  const dependency_handle = analyser.store.getHandle(uri) orelse continue;
                  try builder.collectReferences(dependency_handle, .root);
              }
@@ -338,39 +336,164 @@ fn symbolReferences(
          return builder.locations;
 }
 
+/// The building of necessary data (build config) is made asynchronously,
+/// the code does not wait for it,
+/// for the general philosophy of client calls, and receives answer immediately, 
+/// does not block and if needed retries.
+/// This is applied in the deeper code in getAssociatedBuildFile() in:
+///
+///  1) getAssociatedBuildFile -> collectPotentialBuildFiles -> getOrLoadBuildFile -> invalidateBuildFile -> async invalidateBuildFileWorker
+///      this starts the build runner that starts the job of populating the build file struct's config field, among other things
+///
+///  Then later
+///
+///  2) getAssociatedBuildFile -> isAssociatedWith -> tryLockConfig
+///      this checks if the config is ready and returns it, or returns null if it is not
+///      as the job is done in async, it does not wait for it to finish
+///      and returns imidiately.
+///
+///  For other cases this behavior might be desired, but it is not here.
+///  This fails the reference finding if it is called for the first time since startup.
+///  As the behavior of failing upon the search is very undesirable for reference search,
+///      (for example when using lsp rename, we do not want it not to find some references) 
+///  when the call failed due to being too early, it should retry.
+///  The original dev even placed here a comment stating that it should wait and retry upon receiving .unresolved.
+///  It cannot be placed deeper down the calls because the getAssociatedBuildFile()
+///  is called by many other functions.
+///  Its core design is to return imidiately and not wait, so other call sites might expect that behavior.
+///  But this one does not, so here is my little fix with the help of ai to find this error. 
+/// 
+/// On further investigation:
+///     It would be possible to tell the client to retry, but that would require the getAssociatedBuildFile()
+///     and further functions to know that the build runner is not ready yet but will be.
+///     It would return a proper error then gatherWorkspaceReferenceCandidates() would return it instead of an empty hashmap like it is now.
+///     Then symbolReferences() would also need to have the error added as return type.
+///     referencesHandler() already has server errors as return type,
+///     but unfortunately there is no LSP-standard "not ready, retry" error code
+///     and clients do not retry references requests on errors anyway. <- information from AI
+///
+///
+///     referencesHandler() -> symbolReferences() -> gatherWorkspaceReferenceCandidates() -> getAssociatedBuildFile() -> ...
+///
+///
+/// /\ My comment /\
+/// =====================================
+/// \/ The doc comment suggested by AI \/
+///
+/// Like `Handle.getAssociatedBuildFile`, but if the build config is not yet
+/// ready (returns `.unresolved`), awaits the pending build runner tasks and
+/// retries once. This is needed for operations like find references where
+/// returning an empty result is worse than blocking briefly.
+///
+/// Most callers of `getAssociatedBuildFile` prefer the non-blocking behavior
+/// and handle `.unresolved` by retrying on the next client request — this
+/// helper is for the cases where that philosophy fails the user.
+fn resolveAssociatedBuildFile(
+    store: *DocumentStore,
+    handle: *DocumentStore.Handle,
+) error{ Canceled, OutOfMemory }!DocumentStore.Handle.AssociatedBuildFile {
+    const result = try handle.getAssociatedBuildFile(store);
+    if (result != .unresolved) return result;
+    // await build runner and retry once
+    try store.wait_group.await(store.io);
+    return handle.getAssociatedBuildFile(store);
+}
+
 fn gatherWorkspaceReferenceCandidates(
     store: *DocumentStore,
     arena: std.mem.Allocator,
+    /// The file on which the request was initiated.
+    root_handle: *DocumentStore.Handle,
     /// The file which contains the symbol that is being searched for.
     target_handle: *DocumentStore.Handle,
 ) Analyser.Error!Uri.ArrayHashMap(void) {
-    std.debug.print("gather start", .{});
+    if (DocumentStore.supports_build_system) no_build_file: {
+        const resolved = switch (try resolveAssociatedBuildFile(store, root_handle)) {
+            .unresolved => return .empty, 
+            .none => break :no_build_file,
+            .resolved => |resolved| resolved,
+        };
+
+        const root_module_root_uri: Uri = try .fromPath(arena, resolved.root_source_file);
+
+        var found_uris: Uri.ArrayHashMap(void) = .empty;
+        try found_uris.put(arena, root_module_root_uri, {});
+
+
+        if (root_handle.uri.eql(target_handle.uri)) {
+
+            // Placed here, it will handle a situation when target handle is the same as root handle.
+            // A little of duplication avoids unnecessary second loading of the same build file.
+
+            // This part will add root files of all modules that import this one.
+            const imported_by = store.modules_imported_by.map.get(resolved.root_source_file);
+
+            if (imported_by) |importer_list| {
+                for (importer_list.items) |importer_path| {
+                    const importer_uri = try Uri.fromPath(arena, importer_path);
+                    try found_uris.put(arena, importer_uri, {});
+                }
+            }
+        } else {
+
+            switch (try resolveAssociatedBuildFile(store, target_handle)) {
+                .unresolved, .none => {},
+                .resolved => |resolved2| {
+
+                    const target_module_root_uri: Uri = try .fromPath(arena, resolved2.root_source_file);
+                    // also search through the module in which the symbol has been defined
+                    try found_uris.put(arena, target_module_root_uri, {});
+
+
+                    // This part will add root files of all modules that import this one.
+                    const imported_by = store.modules_imported_by.map.get(resolved2.root_source_file);
+
+                    if (imported_by) |importer_list| {
+                        for (importer_list.items) |importer_path| {
+                            const importer_uri = try Uri.fromPath(arena, importer_path);
+                            try found_uris.put(arena, importer_uri, {});
+                        }
+                    }
+                },
+
+            }
+        }
+
+
+        var i: usize = 0;
+        while (i < found_uris.count()) : (i += 1) {
+            const uri = found_uris.keys()[i];
+            const handle = try store.getOrLoadHandle(uri) orelse continue;
+
+            try found_uris.ensureUnusedCapacity(arena, handle.file_imports.len);
+            for (handle.file_imports) |import_uri| found_uris.putAssumeCapacity(import_uri, {});
+        }
+        return found_uris;
+    }
+
+    var per_file_dependants: Uri.ArrayHashMap(std.ArrayList(Uri)) = .empty;
+
+    var it: DocumentStore.HandleIterator = .{ .store = store };
+    while (it.next()) |handle| {
+        for (handle.file_imports) |import_uri| {
+            const gop = try per_file_dependants.getOrPutValue(arena, import_uri, .empty);
+            try gop.value_ptr.append(arena, handle.uri);
+        }
+    }
+
     var found_uris: Uri.ArrayHashMap(void) = .empty;
     try found_uris.put(arena, target_handle.uri, {});
-
-    // var iter = store.handles_imported_by.module_dictionary.iterator();
-    // std.debug.print("printing module dictionary | ", .{});
-    // while (iter.next()) |entry| {
-    // std.debug.print("module name: {s}, uri: {s} | ", .{ entry.key_ptr.*, entry.value_ptr.raw });
-    // }
 
     var i: usize = 0;
     while (i < found_uris.count()) : (i += 1) {
         const uri = found_uris.keys()[i];
-        const imported_by = store.handles_imported_by.map.getPtr(uri) orelse continue;
-
-        std.debug.print("printing imported by for: {s} | ", .{ uri.raw });
-
-        if (!imported_by.file_deleted) {
-            for (imported_by.importers.keys()) |importer_uri| {
-                std.debug.print("{s} | ", .{ importer_uri.raw });
-                try found_uris.put(arena, importer_uri, {});
-            }
-        }
+        const dependants: std.ArrayList(Uri) = per_file_dependants.get(uri) orelse .empty;
+        try found_uris.ensureUnusedCapacity(arena, dependants.items.len);
+        for (dependants.items) |dependant_uri| found_uris.putAssumeCapacity(dependant_uri, {});
     }
+
     return found_uris;
 }
-
 fn controlFlowReferences(
     allocator: std.mem.Allocator,
     token_handle: Analyser.TokenWithHandle,
@@ -620,7 +743,7 @@ pub fn callsiteReferences(
         var uris = try gatherWorkspaceReferenceCandidates(
             analyser.store,
             analyser.arena,
-            // decl_handle.handle,
+            decl_handle.handle,
             decl_handle.handle,
         );
         for (uris.keys()) |uri| {
@@ -664,8 +787,6 @@ pub const GeneralReferencesResponse = union {
 pub fn referencesHandler(server: *Server, arena: std.mem.Allocator, request: GeneralReferencesRequest) Server.Error!?GeneralReferencesResponse {
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
-
-    // std.debug.print("testing reach", .{});
 
     const uri = Uri.parse(arena, request.uri()) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
