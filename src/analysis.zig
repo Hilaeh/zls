@@ -29,39 +29,39 @@ const version_data = @import("version_data");
 const Analyser = @This();
 
 gpa: std.mem.Allocator,
-arena: std.mem.Allocator,
-store: *DocumentStore,
-ip: *InternPool,
-resolved_callsites: std.AutoHashMapUnmanaged(Declaration.Param, ?Type) = .empty,
-resolved_nodes: std.HashMapUnmanaged(NodeWithUri, ?Binding, NodeWithUri.Context, std.hash_map.default_max_load_percentage) = .empty,
-collect_callsite_references: bool,
-/// avoid unnecessarily parsing number literals
-resolve_number_literal_values: bool,
-/// handle of the doc where the request originated
-root_handle: ?*DocumentStore.Handle,
-max_conditional_combos: usize = 200,
-
-const NodeSet = std.HashMapUnmanaged(NodeWithUri, void, NodeWithUri.Context, std.hash_map.default_max_load_percentage);
-
-pub const Error = std.mem.Allocator.Error || std.Io.Cancelable;
-
-pub fn init(
-    gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
     store: *DocumentStore,
     ip: *InternPool,
+    resolved_callsites: std.AutoHashMapUnmanaged(Declaration.Param, ?Type) = .empty,
+    resolved_nodes: std.HashMapUnmanaged(NodeWithUri, ?Binding, NodeWithUri.Context, std.hash_map.default_max_load_percentage) = .empty,
+    collect_callsite_references: bool,
+    /// avoid unnecessarily parsing number literals
+    resolve_number_literal_values: bool,
+    /// handle of the doc where the request originated
     root_handle: ?*DocumentStore.Handle,
-) Analyser {
-    return .{
-        .gpa = gpa,
-        .arena = arena,
-        .store = store,
-        .ip = ip,
-        .collect_callsite_references = true,
-        .resolve_number_literal_values = false,
-        .root_handle = root_handle,
-    };
-}
+    max_conditional_combos: usize = 200,
+
+    const NodeSet = std.HashMapUnmanaged(NodeWithUri, void, NodeWithUri.Context, std.hash_map.default_max_load_percentage);
+
+    pub const Error = std.mem.Allocator.Error || std.Io.Cancelable;
+
+    pub fn init(
+        gpa: std.mem.Allocator,
+        arena: std.mem.Allocator,
+        store: *DocumentStore,
+        ip: *InternPool,
+        root_handle: ?*DocumentStore.Handle,
+    ) Analyser {
+        return .{
+            .gpa = gpa,
+            .arena = arena,
+            .store = store,
+            .ip = ip,
+            .collect_callsite_references = true,
+            .resolve_number_literal_values = false,
+            .root_handle = root_handle,
+        };
+    }
 
 pub fn deinit(self: *Analyser) void {
     self.resolved_callsites.deinit(self.gpa);
@@ -231,7 +231,7 @@ pub const FormatFunctionOptions = struct {
             include_names: bool,
             include_types: bool,
         },
-    },
+        },
     include_return_type: bool,
     snippet_placeholders: bool,
 };
@@ -496,88 +496,88 @@ pub fn getVariableSignature(
 ) error{OutOfMemory}![]const u8 {
     const start_token = if (include_name)
         var_decl.ast.mut_token
-    else if (var_decl.ast.type_node.unwrap()) |type_node|
-        tree.firstToken(type_node)
-    else if (var_decl.ast.init_node.unwrap()) |init_node|
-        tree.firstToken(init_node)
-    else
-        return "";
+        else if (var_decl.ast.type_node.unwrap()) |type_node|
+            tree.firstToken(type_node)
+                else if (var_decl.ast.init_node.unwrap()) |init_node|
+                    tree.firstToken(init_node)
+                        else
+                            return "";
 
-    const init_node = var_decl.ast.init_node.unwrap() orelse {
-        const type_node = var_decl.ast.type_node.unwrap() orelse return "";
-        return offsets.tokensToSlice(tree, start_token, ast.lastToken(tree, type_node));
-    };
+                        const init_node = var_decl.ast.init_node.unwrap() orelse {
+                            const type_node = var_decl.ast.type_node.unwrap() orelse return "";
+                            return offsets.tokensToSlice(tree, start_token, ast.lastToken(tree, type_node));
+                        };
 
-    const end_token = switch (tree.nodeTag(init_node)) {
-        .container_decl,
-        .container_decl_trailing,
-        .container_decl_arg,
-        .container_decl_arg_trailing,
-        .container_decl_two,
-        .container_decl_two_trailing,
-        .tagged_union,
-        .tagged_union_trailing,
-        .tagged_union_enum_tag,
-        .tagged_union_enum_tag_trailing,
-        .tagged_union_two,
-        .tagged_union_two_trailing,
-        => end_token: {
-            var buf: [2]Ast.Node.Index = undefined;
-            const container_decl = tree.fullContainerDecl(&buf, init_node).?;
+                        const end_token = switch (tree.nodeTag(init_node)) {
+                            .container_decl,
+                            .container_decl_trailing,
+                            .container_decl_arg,
+                            .container_decl_arg_trailing,
+                            .container_decl_two,
+                            .container_decl_two_trailing,
+                            .tagged_union,
+                            .tagged_union_trailing,
+                            .tagged_union_enum_tag,
+                            .tagged_union_enum_tag_trailing,
+                            .tagged_union_two,
+                            .tagged_union_two_trailing,
+                            => end_token: {
+                                var buf: [2]Ast.Node.Index = undefined;
+                                const container_decl = tree.fullContainerDecl(&buf, init_node).?;
 
-            var token = container_decl.ast.main_token;
-            var offset: Ast.TokenIndex = 0;
+                                var token = container_decl.ast.main_token;
+                                var offset: Ast.TokenIndex = 0;
 
-            // Tagged union: union(enum)
-            if (container_decl.ast.enum_token) |enum_token| {
-                token = enum_token;
-                offset += 1;
-            }
+                                // Tagged union: union(enum)
+                                if (container_decl.ast.enum_token) |enum_token| {
+                                    token = enum_token;
+                                    offset += 1;
+                                }
 
-            // Backing integer: struct(u32), union(enum(u32))
-            // Tagged union: union(ComplexTypeTag)
-            if (container_decl.ast.arg.unwrap()) |arg| {
-                token = ast.lastToken(tree, arg);
-                offset += 1;
-            }
+                                // Backing integer: struct(u32), union(enum(u32))
+                                // Tagged union: union(ComplexTypeTag)
+                                if (container_decl.ast.arg.unwrap()) |arg| {
+                                    token = ast.lastToken(tree, arg);
+                                    offset += 1;
+                                }
 
-            if (container_decl.ast.members.len == 0) break :end_token token + offset;
+                                if (container_decl.ast.members.len == 0) break :end_token token + offset;
 
-            // e.g. 'pub const Mode = enum { zig, zon };'
-            if (tree.tokensOnSameLine(tree.firstToken(init_node), ast.lastToken(tree, init_node))) {
-                break :end_token ast.lastToken(tree, init_node);
-            }
+                                // e.g. 'pub const Mode = enum { zig, zon };'
+                                if (tree.tokensOnSameLine(tree.firstToken(init_node), ast.lastToken(tree, init_node))) {
+                                    break :end_token ast.lastToken(tree, init_node);
+                                }
 
-            var members_source: std.ArrayList(u8) = .empty;
+                                var members_source: std.ArrayList(u8) = .empty;
 
-            for (container_decl.ast.members) |member| {
-                const member_line_start = offsets.lineLocUntilIndex(tree.source, tree.tokenStart(tree.firstToken(member))).start;
+                                for (container_decl.ast.members) |member| {
+                                    const member_line_start = offsets.lineLocUntilIndex(tree.source, tree.tokenStart(tree.firstToken(member))).start;
 
-                const member_source_indented = switch (tree.nodeTag(member)) {
-                    .container_field_init,
-                    .container_field_align,
-                    .container_field,
-                    => tree.source[member_line_start..offsets.tokenToLoc(tree, ast.lastToken(tree, member)).end],
-                    else => continue,
-                };
-                try members_source.append(arena, '\n');
-                try members_source.appendSlice(arena, try trimCommonIndentation(arena, member_source_indented, 4));
-                try members_source.append(arena, ',');
-            }
+                                    const member_source_indented = switch (tree.nodeTag(member)) {
+                                        .container_field_init,
+                                        .container_field_align,
+                                        .container_field,
+                                        => tree.source[member_line_start..offsets.tokenToLoc(tree, ast.lastToken(tree, member)).end],
+                                        else => continue,
+                                    };
+                                    try members_source.append(arena, '\n');
+                                    try members_source.appendSlice(arena, try trimCommonIndentation(arena, member_source_indented, 4));
+                                    try members_source.append(arena, ',');
+                                }
 
-            if (members_source.items.len == 0) break :end_token token + offset;
+                                if (members_source.items.len == 0) break :end_token token + offset;
 
-            return try std.mem.concat(arena, u8, &.{
-                offsets.tokensToSlice(tree, start_token, token + offset),
-                " {",
-                members_source.items,
-                "\n}",
-            });
-        },
-        else => ast.lastToken(tree, init_node),
-    };
+                                return try std.mem.concat(arena, u8, &.{
+                                    offsets.tokensToSlice(tree, start_token, token + offset),
+                                    " {",
+                                    members_source.items,
+                                    "\n}",
+                                });
+                            },
+                            else => ast.lastToken(tree, init_node),
+                        };
 
-    return offsets.tokensToSlice(tree, start_token, end_token);
+                        return offsets.tokensToSlice(tree, start_token, end_token);
 }
 
 fn trimCommonIndentation(allocator: std.mem.Allocator, str: []const u8, preserved_indentation_amount: usize) error{OutOfMemory}![]u8 {
@@ -694,42 +694,42 @@ pub fn resolveVarDeclAlias(analyser: *Analyser, decl: DeclWithHandle) Error!?Dec
                     break :blk try ty.lookupSymbol(analyser, name);
                 }
                 break :blk try analyser.lookupSymbolGlobal(
-                    handle,
-                    name,
-                    tree.tokenStart(name_token),
-                );
-            },
-            .field_access => blk: {
-                const lhs, const field_name = tree.nodeData(node).node_and_token;
-                const resolved = (try analyser.resolveTypeOfNode(.{
-                    .node_handle = .of(lhs, handle),
-                    .container_type = current.container_type,
-                })) orelse break :blk null;
-                if (!resolved.is_type_val)
-                    break :blk null;
+                           handle,
+                           name,
+                           tree.tokenStart(name_token),
+                       );
+                   },
+                   .field_access => blk: {
+                       const lhs, const field_name = tree.nodeData(node).node_and_token;
+                       const resolved = (try analyser.resolveTypeOfNode(.{
+                           .node_handle = .of(lhs, handle),
+                           .container_type = current.container_type,
+                       })) orelse break :blk null;
+                       if (!resolved.is_type_val)
+                           break :blk null;
 
-                const symbol_name = offsets.identifierTokenToNameSlice(tree, field_name);
+                       const symbol_name = offsets.identifierTokenToNameSlice(tree, field_name);
 
-                break :blk try resolved.lookupSymbol(analyser, symbol_name);
-            },
-            .global_var_decl,
-            .local_var_decl,
-            .aligned_var_decl,
-            .simple_var_decl,
-            => {
-                const var_decl = tree.fullVarDecl(node).?;
+                       break :blk try resolved.lookupSymbol(analyser, symbol_name);
+                   },
+                   .global_var_decl,
+                   .local_var_decl,
+                   .aligned_var_decl,
+                   .simple_var_decl,
+                   => {
+                       const var_decl = tree.fullVarDecl(node).?;
 
-                const base_exp = var_decl.ast.init_node.unwrap() orelse return result;
-                if (tree.tokenTag(var_decl.ast.mut_token) != .keyword_const) return result;
+                       const base_exp = var_decl.ast.init_node.unwrap() orelse return result;
+                       if (tree.tokenTag(var_decl.ast.mut_token) != .keyword_const) return result;
 
-                const gop = try node_trail.getOrPut(analyser.gpa, .{ .node = base_exp, .uri = handle.uri });
-                if (gop.found_existing) return null;
+                       const gop = try node_trail.getOrPut(analyser.gpa, .{ .node = base_exp, .uri = handle.uri });
+                       if (gop.found_existing) return null;
 
-                current.node_handle.node = base_exp;
-                continue;
-            },
-            else => null,
-        } orelse return result;
+                       current.node_handle.node = base_exp;
+                       continue;
+                   },
+                   else => null,
+                   } orelse return result;
 
         const resolved_node = switch (resolved.decl) {
             .ast_node => |resolved_node| resolved_node,
@@ -1102,7 +1102,7 @@ fn bracketAccessTypeFromIPIndex(analyser: *Analyser, ip_index: InternPool.Index)
                     .sentinel = .none,
                     .elem_ty = try analyser.allocType(try analyser.bracketAccessTypeFromIPIndex(info.child)),
                 },
-            },
+                },
             .is_type_val = true,
         },
         .array_type => |info| .{
@@ -1112,7 +1112,7 @@ fn bracketAccessTypeFromIPIndex(analyser: *Analyser, ip_index: InternPool.Index)
                     .sentinel = info.sentinel,
                     .elem_ty = try analyser.allocType(try analyser.bracketAccessTypeFromIPIndex(info.child)),
                 },
-            },
+                },
             .is_type_val = true,
         },
         .pointer_type => |info| .{
@@ -1123,7 +1123,7 @@ fn bracketAccessTypeFromIPIndex(analyser: *Analyser, ip_index: InternPool.Index)
                     .is_const = info.flags.is_const,
                     .elem_ty = try analyser.allocType(try analyser.bracketAccessTypeFromIPIndex(info.elem_type)),
                 },
-            },
+                },
             .is_type_val = true,
         },
         else => Type.fromIP(analyser, .type_type, ip_index),
@@ -1182,7 +1182,7 @@ pub fn resolveBracketAccess(analyser: *Analyser, lhs_binding: Binding, rhs: Brac
                 sentinel = access.sentinel;
                 break :elem info.elem_ty;
             },
-        },
+            },
         .pointer => |info| switch (info.size) {
             .one => switch (info.elem_ty.data) {
                 .tuple, .array => continue :elem info.elem_ty.data,
@@ -1195,38 +1195,38 @@ pub fn resolveBracketAccess(analyser: *Analyser, lhs_binding: Binding, rhs: Brac
                         result = .{ .array = end - start };
                         break :elem info.elem_ty;
                     },
+                    },
                 },
-            },
-            .many, .slice, .c => switch (rhs) {
-                .single => {
-                    const instance = try info.elem_ty.instanceUnchecked(analyser);
-                    return .{ .type = instance, .is_const = is_const };
+                .many, .slice, .c => switch (rhs) {
+                    .single => {
+                        const instance = try info.elem_ty.instanceUnchecked(analyser);
+                        return .{ .type = instance, .is_const = is_const };
+                    },
+                    .open => |access| {
+                        sentinel = access.sentinel;
+                        if (sentinel == info.sentinel) return lhs_binding;
+                        if (sentinel == .none) sentinel = info.sentinel;
+                        break :elem info.elem_ty;
+                    },
+                    .range => |access| {
+                        if (access.bounds) |bounds| {
+                            const start, const end = bounds;
+                            result = .{ .array = if (start <= end) end - start else null };
+                        }
+                        sentinel = access.sentinel;
+                        break :elem info.elem_ty;
+                    },
+                    },
                 },
-                .open => |access| {
-                    sentinel = access.sentinel;
-                    if (sentinel == info.sentinel) return lhs_binding;
-                    if (sentinel == .none) sentinel = info.sentinel;
-                    break :elem info.elem_ty;
+                .ip_index => |payload| {
+                    const ty = try analyser.bracketAccessTypeFromIPIndex(payload.type);
+                    const instance = try ty.instanceUnchecked(analyser);
+                    const binding: Binding = .{ .type = instance, .is_const = is_const };
+                    if (lhs.eql(binding.type)) return null;
+                    return analyser.resolveBracketAccess(binding, rhs);
                 },
-                .range => |access| {
-                    if (access.bounds) |bounds| {
-                        const start, const end = bounds;
-                        result = .{ .array = if (start <= end) end - start else null };
-                    }
-                    sentinel = access.sentinel;
-                    break :elem info.elem_ty;
-                },
-            },
-        },
-        .ip_index => |payload| {
-            const ty = try analyser.bracketAccessTypeFromIPIndex(payload.type);
-            const instance = try ty.instanceUnchecked(analyser);
-            const binding: Binding = .{ .type = instance, .is_const = is_const };
-            if (lhs.eql(binding.type)) return null;
-            return analyser.resolveBracketAccess(binding, rhs);
-        },
-        else => return null,
-    };
+                else => return null,
+            };
 
     switch (result) {
         .array => |elem_count| {
@@ -1269,7 +1269,7 @@ pub fn resolvePropertyType(analyser: *Analyser, ty: Type, name: []const u8) erro
                                 .is_const = info.is_const,
                                 .elem_ty = info.elem_ty,
                             },
-                        },
+                            },
                         .is_type_val = false,
                     };
                 }
@@ -1336,7 +1336,7 @@ pub fn resolvePropertyType(analyser: *Analyser, ty: Type, name: []const u8) erro
                             .ty = .usize_type,
                             .int = array_info.len,
                         },
-                    });
+                        });
                     return Type.fromIP(analyser, .usize_type, index);
                 }
             },
@@ -1348,7 +1348,7 @@ pub fn resolvePropertyType(analyser: *Analyser, ty: Type, name: []const u8) erro
                             .ty = .usize_type,
                             .int = tuple_info.types.len,
                         },
-                    });
+                        });
                     return Type.fromIP(analyser, .usize_type, index);
                 }
                 if (!allDigits(name)) return null;
@@ -1640,7 +1640,7 @@ fn resolvePeerTypesInternal(analyser: *Analyser, a: Type, b: Type) error{OutOfMe
                                     .error_set = b_info.error_set,
                                     .payload = try analyser.allocType(try a.typeOf(analyser)),
                                 },
-                            },
+                                },
                             .is_type_val = false,
                         };
                     }
@@ -1674,7 +1674,7 @@ fn resolvePeerTypesInternal(analyser: *Analyser, a: Type, b: Type) error{OutOfMe
                                 .error_set = resolved_error_set,
                                 .payload = resolved_payload,
                             },
-                        },
+                            },
                         .is_type_val = false,
                     };
                 },
@@ -1695,7 +1695,7 @@ fn resolvePeerTypesInternal(analyser: *Analyser, a: Type, b: Type) error{OutOfMe
                                     .is_type_val = true,
                                 }),
                             },
-                        },
+                            },
                         .is_type_val = false,
                     };
                 },
@@ -1703,7 +1703,7 @@ fn resolvePeerTypesInternal(analyser: *Analyser, a: Type, b: Type) error{OutOfMe
                     .data = .{ .optional = try analyser.allocType(try b.typeOf(analyser)) },
                     .is_type_val = false,
                 },
-            },
+                },
             .error_set => switch (b.data) {
                 .error_union => |b_info| {
                     const resolved_error_set = blk: {
@@ -1719,7 +1719,7 @@ fn resolvePeerTypesInternal(analyser: *Analyser, a: Type, b: Type) error{OutOfMe
                                 .error_set = resolved_error_set,
                                 .payload = b_info.payload,
                             },
-                        },
+                            },
                         .is_type_val = false,
                     };
                 },
@@ -1729,10 +1729,10 @@ fn resolvePeerTypesInternal(analyser: *Analyser, a: Type, b: Type) error{OutOfMe
                             .error_set = try analyser.allocType(try a.typeOf(analyser)),
                             .payload = try analyser.allocType(try b.typeOf(analyser)),
                         },
-                    },
+                        },
                     .is_type_val = false,
                 },
-            },
+                },
             else => {},
         },
         else => {},
@@ -1786,35 +1786,35 @@ fn resolveCallsiteReferences(analyser: *Analyser, decl_handle: DeclWithHandle) E
 
         const real_param_idx = if (func_params_len != 0 and pay.param_index != 0 and call.ast.params.len == func_params_len - 1)
             pay.param_index - 1
-        else
-            pay.param_index;
+            else
+                pay.param_index;
 
-        if (real_param_idx >= call.ast.params.len) continue;
+            if (real_param_idx >= call.ast.params.len) continue;
 
-        var ty = resolve_ty: {
-            // don't resolve callsite references while resolving callsite references
-            const old_collect_callsite_references = analyser.collect_callsite_references;
-            defer analyser.collect_callsite_references = old_collect_callsite_references;
-            analyser.collect_callsite_references = false;
+            var ty = resolve_ty: {
+                // don't resolve callsite references while resolving callsite references
+                const old_collect_callsite_references = analyser.collect_callsite_references;
+                defer analyser.collect_callsite_references = old_collect_callsite_references;
+                analyser.collect_callsite_references = false;
 
-            break :resolve_ty try analyser.resolveTypeOfNode(.of(
-                // TODO?: this is a """heuristic based approach"""
-                // perhaps it would be better to use proper self detection
-                // maybe it'd be a perf issue and this is fine?
-                // you figure it out future contributor <3
-                call.ast.params[real_param_idx],
-                ref.handle,
-            )) orelse continue;
-        };
+                break :resolve_ty try analyser.resolveTypeOfNode(.of(
+                               // TODO?: this is a """heuristic based approach"""
+                               // perhaps it would be better to use proper self detection
+                               // maybe it'd be a perf issue and this is fine?
+                               // you figure it out future contributor <3
+                               call.ast.params[real_param_idx],
+                               ref.handle,
+                       )) orelse continue;
+                   };
 
-        ty = try ty.typeOf(analyser);
-        std.debug.assert(ty.is_type_val);
+            ty = try ty.typeOf(analyser);
+            std.debug.assert(ty.is_type_val);
 
-        const loc = offsets.tokenToPosition(tree, tree.nodeMainToken(call.ast.params[real_param_idx]), .@"utf-8");
-        try possible.append(analyser.arena, .{
-            .type = ty,
-            .descriptor = try std.fmt.allocPrint(analyser.arena, "{s}:{d}:{d}", .{ ref.handle.uri.raw, loc.line + 1, loc.character + 1 }),
-        });
+            const loc = offsets.tokenToPosition(tree, tree.nodeMainToken(call.ast.params[real_param_idx]), .@"utf-8");
+            try possible.append(analyser.arena, .{
+                .type = ty,
+                .descriptor = try std.fmt.allocPrint(analyser.arena, "{s}:{d}:{d}", .{ ref.handle.uri.raw, loc.line + 1, loc.character + 1 }),
+            });
     }
 
     const maybe_type = try Type.fromEither(analyser, possible.items);
@@ -2289,784 +2289,784 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, options: ResolveOptions) Error
                 return try Type.createTupleType(analyser, elem_ty_slice);
             }
 
-            return try analyser.innermostContainer(handle, tree.tokenStart(tree.firstToken(node)));
-        },
-        .builtin_call,
-        .builtin_call_comma,
-        .builtin_call_two,
-        .builtin_call_two_comma,
-        => {
-            var buffer: [2]Ast.Node.Index = undefined;
-            const params = tree.builtinCallParams(&buffer, node).?;
+                         return try analyser.innermostContainer(handle, tree.tokenStart(tree.firstToken(node)));
+                     },
+                     .builtin_call,
+                     .builtin_call_comma,
+                     .builtin_call_two,
+                     .builtin_call_two_comma,
+                     => {
+                         var buffer: [2]Ast.Node.Index = undefined;
+                         const params = tree.builtinCallParams(&buffer, node).?;
 
-            const call_name = tree.tokenSlice(tree.nodeMainToken(node));
+                         const call_name = tree.tokenSlice(tree.nodeMainToken(node));
 
-            const item = std.zig.BuiltinFn.list.get(call_name) orelse return null;
-            switch (item.tag) {
-                .This => {
-                    if (params.len != 0) return null;
-                    return options.container_type orelse try analyser.innermostContainer(handle, tree.tokenStart(tree.firstToken(node)));
-                },
-                .as => {
-                    if (params.len < 1) return null;
-                    const ty = (try analyser.resolveTypeOfNodeInternal(.of(params[0], handle))) orelse return null;
-                    num: {
-                        if (params.len < 2) break :num;
-                        const ip_ty = ty.ipIndex() orelse break :num;
-                        const ip_index = try analyser.resolveCoercedIPValue(ip_ty, .of(params[1], handle)) orelse break :num;
-                        return Type.fromIP(analyser, analyser.ip.typeOf(ip_index), ip_index);
-                    }
-                    return try ty.instanceTypeVal(analyser);
-                },
-                .atomic_load,
-                .atomic_rmw,
-                .@"extern",
-                .mul_add,
-                .union_init,
-                => {
-                    if (params.len < 1) return null;
-                    const ty = (try analyser.resolveTypeOfNodeInternal(.of(params[0], handle))) orelse return null;
-                    return try ty.instanceTypeVal(analyser);
-                },
+                         const item = std.zig.BuiltinFn.list.get(call_name) orelse return null;
+                         switch (item.tag) {
+                             .This => {
+                                 if (params.len != 0) return null;
+                                 return options.container_type orelse try analyser.innermostContainer(handle, tree.tokenStart(tree.firstToken(node)));
+                             },
+                             .as => {
+                                 if (params.len < 1) return null;
+                                 const ty = (try analyser.resolveTypeOfNodeInternal(.of(params[0], handle))) orelse return null;
+                                 num: {
+                                     if (params.len < 2) break :num;
+                                     const ip_ty = ty.ipIndex() orelse break :num;
+                                     const ip_index = try analyser.resolveCoercedIPValue(ip_ty, .of(params[1], handle)) orelse break :num;
+                                     return Type.fromIP(analyser, analyser.ip.typeOf(ip_index), ip_index);
+                                 }
+                                      return try ty.instanceTypeVal(analyser);
+                                  },
+                                  .atomic_load,
+                                  .atomic_rmw,
+                                  .@"extern",
+                                  .mul_add,
+                                  .union_init,
+                                  => {
+                                      if (params.len < 1) return null;
+                                      const ty = (try analyser.resolveTypeOfNodeInternal(.of(params[0], handle))) orelse return null;
+                                      return try ty.instanceTypeVal(analyser);
+                                  },
 
-                .c_va_arg => {
-                    if (params.len < 2) return null;
-                    const ty = (try analyser.resolveTypeOfNodeInternal(.of(params[1], handle))) orelse return null;
-                    return try ty.instanceTypeVal(analyser);
-                },
-                .sqrt,
-                .sin,
-                .cos,
-                .tan,
-                .exp,
-                .exp2,
-                .log,
-                .log2,
-                .log10,
-                .floor,
-                .ceil,
-                .trunc,
-                .round,
-                => {
-                    if (params.len != 1) return null;
-                    const ty = (try analyser.resolveTypeOfNodeInternal(.of(params[0], handle))) orelse return null;
-                    const payload = switch (ty.data) {
-                        .ip_index => |payload| payload,
-                        else => return null,
-                    };
-                    if (!analyser.ip.isFloat(analyser.ip.scalarType(payload.type))) return null;
-                    return Type.fromIP(analyser, payload.type, null);
-                },
-                .abs => {
-                    if (params.len != 1) return null;
+                                  .c_va_arg => {
+                                      if (params.len < 2) return null;
+                                      const ty = (try analyser.resolveTypeOfNodeInternal(.of(params[1], handle))) orelse return null;
+                                      return try ty.instanceTypeVal(analyser);
+                                  },
+                                  .sqrt,
+                                  .sin,
+                                  .cos,
+                                  .tan,
+                                  .exp,
+                                  .exp2,
+                                  .log,
+                                  .log2,
+                                  .log10,
+                                  .floor,
+                                  .ceil,
+                                  .trunc,
+                                  .round,
+                                  => {
+                                      if (params.len != 1) return null;
+                                      const ty = (try analyser.resolveTypeOfNodeInternal(.of(params[0], handle))) orelse return null;
+                                      const payload = switch (ty.data) {
+                                          .ip_index => |payload| payload,
+                                          else => return null,
+                                      };
+                                      if (!analyser.ip.isFloat(analyser.ip.scalarType(payload.type))) return null;
+                                      return Type.fromIP(analyser, payload.type, null);
+                                  },
+                                  .abs => {
+                                      if (params.len != 1) return null;
 
-                    const ty = try analyser.resolveTypeOfNodeInternal(.of(params[0], handle)) orelse return null;
+                                      const ty = try analyser.resolveTypeOfNodeInternal(.of(params[0], handle)) orelse return null;
 
-                    const payload = switch (ty.data) {
-                        .ip_index => |payload| payload,
-                        else => return null,
-                    };
+                                      const payload = switch (ty.data) {
+                                          .ip_index => |payload| payload,
+                                          else => return null,
+                                      };
 
-                    // Based on Sema.zirAbs
-                    const operand_ty = payload.type;
-                    const scalar_ty = analyser.ip.scalarType(operand_ty);
-                    const scalar_tag = analyser.ip.zigTypeTag(scalar_ty) orelse return null;
-                    const result_ty = switch (scalar_tag) {
-                        .comptime_float, .float, .comptime_int => operand_ty,
-                        .int => if (analyser.ip.isSignedInt(scalar_ty, builtin.target))
-                            try analyser.ip.toUnsigned(operand_ty, builtin.target)
-                        else
-                            operand_ty,
-                        else => return null,
-                    };
+                                      // Based on Sema.zirAbs
+                                      const operand_ty = payload.type;
+                                      const scalar_ty = analyser.ip.scalarType(operand_ty);
+                                      const scalar_tag = analyser.ip.zigTypeTag(scalar_ty) orelse return null;
+                                      const result_ty = switch (scalar_tag) {
+                                          .comptime_float, .float, .comptime_int => operand_ty,
+                                          .int => if (analyser.ip.isSignedInt(scalar_ty, builtin.target))
+                                              try analyser.ip.toUnsigned(operand_ty, builtin.target)
+                                              else
+                                                  operand_ty,
+                                                  else => return null,
+                                              };
 
-                    return Type.fromIP(analyser, result_ty, null);
-                },
-                .TypeOf => {
-                    // TODO Do peer type resolution, we just keep the first for now.
+                                      return Type.fromIP(analyser, result_ty, null);
+                                  },
+                                  .TypeOf => {
+                                      // TODO Do peer type resolution, we just keep the first for now.
 
-                    if (params.len < 1) return null;
-                    var resolved_type = (try analyser.resolveTypeOfNodeInternal(.of(params[0], handle))) orelse return null;
-                    return try resolved_type.typeOf(analyser);
-                },
-                .import => {
-                    if (params.len == 0) return null;
-                    const import_param = params[0];
-                    if (tree.nodeTag(import_param) != .string_literal) return null;
+                                      if (params.len < 1) return null;
+                                      var resolved_type = (try analyser.resolveTypeOfNodeInternal(.of(params[0], handle))) orelse return null;
+                                      return try resolved_type.typeOf(analyser);
+                                  },
+                                  .import => {
+                                      if (params.len == 0) return null;
+                                      const import_param = params[0];
+                                      if (tree.nodeTag(import_param) != .string_literal) return null;
 
-                    const string_literal = tree.tokenSlice(tree.nodeMainToken(import_param));
-                    const import_string = string_literal[1 .. string_literal.len - 1];
-                    if (std.mem.endsWith(u8, import_string, ".zon")) {
-                        // TODO
-                        return null;
-                    }
+                                      const string_literal = tree.tokenSlice(tree.nodeMainToken(import_param));
+                                      const import_string = string_literal[1 .. string_literal.len - 1];
+                                      if (std.mem.endsWith(u8, import_string, ".zon")) {
+                                          // TODO
+                                          return null;
+                                      }
 
-                    if (try analyser.resolveImportString(handle, import_string)) |ty| return ty;
-                    if (try analyser.resolveImportString(analyser.root_handle orelse return null, import_string)) |ty| return ty;
-                    return null;
-                },
-                .c_import => {
-                    if (!DocumentStore.supports_build_system) return null;
-                    const cimport_uri = (try analyser.store.resolveCImport(handle, node)) orelse return null;
+                                      if (try analyser.resolveImportString(handle, import_string)) |ty| return ty;
+                                      if (try analyser.resolveImportString(analyser.root_handle orelse return null, import_string)) |ty| return ty;
+                                      return null;
+                                  },
+                                  .c_import => {
+                                      if (!DocumentStore.supports_build_system) return null;
+                                      const cimport_uri = (try analyser.store.resolveCImport(handle, node)) orelse return null;
 
-                    const new_handle = try analyser.store.getOrLoadHandle(cimport_uri) orelse return null;
+                                      const new_handle = try analyser.store.getOrLoadHandle(cimport_uri) orelse return null;
 
-                    return .{
-                        .data = .{ .container = .root(new_handle) },
-                        .is_type_val = true,
-                    };
-                },
-                .FieldType => {
-                    if (params.len < 2) return null;
+                                      return .{
+                                          .data = .{ .container = .root(new_handle) },
+                                          .is_type_val = true,
+                                      };
+                                  },
+                                  .FieldType => {
+                                      if (params.len < 2) return null;
 
-                    const container_type = (try analyser.resolveTypeOfNodeInternal(.of(params[0], handle))) orelse return null;
-                    const instance = try container_type.instanceTypeVal(analyser) orelse return null;
+                                      const container_type = (try analyser.resolveTypeOfNodeInternal(.of(params[0], handle))) orelse return null;
+                                      const instance = try container_type.instanceTypeVal(analyser) orelse return null;
 
-                    const field_name = try analyser.resolveStringLiteral(.of(params[1], handle)) orelse return null;
+                                      const field_name = try analyser.resolveStringLiteral(.of(params[1], handle)) orelse return null;
 
-                    const field = try instance.lookupSymbol(analyser, field_name) orelse return null;
-                    const result = try field.resolveType(analyser) orelse return null;
-                    return try result.typeOf(analyser);
-                },
-                .field => {
-                    if (params.len < 2) return null;
+                                      const field = try instance.lookupSymbol(analyser, field_name) orelse return null;
+                                      const result = try field.resolveType(analyser) orelse return null;
+                                      return try result.typeOf(analyser);
+                                  },
+                                  .field => {
+                                      if (params.len < 2) return null;
 
-                    const lhs = (try analyser.resolveTypeOfNodeInternal(.of(params[0], handle))) orelse return null;
+                                      const lhs = (try analyser.resolveTypeOfNodeInternal(.of(params[0], handle))) orelse return null;
 
-                    const field_name = try analyser.resolveStringLiteral(.of(params[1], handle)) orelse return null;
+                                      const field_name = try analyser.resolveStringLiteral(.of(params[1], handle)) orelse return null;
 
-                    return try analyser.resolveFieldAccess(lhs, field_name);
-                },
-                .compile_error => {
-                    return .{ .data = .{ .compile_error = node_handle }, .is_type_val = false };
-                },
-                .EnumLiteral => {
-                    return Type.fromIP(analyser, .type_type, .enum_literal_type);
-                },
-                .Vector => {
-                    if (params.len != 2) return null;
+                                      return try analyser.resolveFieldAccess(lhs, field_name);
+                                  },
+                                  .compile_error => {
+                                      return .{ .data = .{ .compile_error = node_handle }, .is_type_val = false };
+                                  },
+                                  .EnumLiteral => {
+                                      return Type.fromIP(analyser, .type_type, .enum_literal_type);
+                                  },
+                                  .Vector => {
+                                      if (params.len != 2) return null;
 
-                    const child_ty = try analyser.resolveTypeOfNodeInternal(.of(params[1], handle)) orelse return null;
-                    if (!child_ty.is_type_val) return null;
+                                      const child_ty = try analyser.resolveTypeOfNodeInternal(.of(params[1], handle)) orelse return null;
+                                      if (!child_ty.is_type_val) return null;
 
-                    const child_ty_ip_index = switch (child_ty.data) {
-                        .ip_index => |payload| payload.index orelse try analyser.ip.getUnknown(payload.type),
-                        else => return null,
-                    };
+                                      const child_ty_ip_index = switch (child_ty.data) {
+                                          .ip_index => |payload| payload.index orelse try analyser.ip.getUnknown(payload.type),
+                                          else => return null,
+                                      };
 
-                    const len = try analyser.resolveIntegerLiteral(u32, .of(params[0], handle)) orelse
-                        return null; // `InternPool.Key.Vector.len` can't represent unknown length yet
+                                      const len = try analyser.resolveIntegerLiteral(u32, .of(params[0], handle)) orelse
+                                          return null; // `InternPool.Key.Vector.len` can't represent unknown length yet
 
-                    const vector_ty_ip_index = try analyser.ip.get(.{
-                        .vector_type = .{
-                            .len = len,
-                            .child = child_ty_ip_index,
-                        },
-                    });
+                                      const vector_ty_ip_index = try analyser.ip.get(.{
+                                          .vector_type = .{
+                                              .len = len,
+                                              .child = child_ty_ip_index,
+                                          },
+                                          });
 
-                    return Type.fromIP(analyser, .type_type, vector_ty_ip_index);
-                },
-                else => {
-                    const data = version_data.builtins.get(call_name) orelse return null;
-                    return analyser.resolveLangrefType(data.return_type);
-                },
-            }
-        },
-        .fn_proto,
-        .fn_proto_multi,
-        .fn_proto_one,
-        .fn_proto_simple,
-        .fn_decl,
-        => {
-            var buf: [1]Ast.Node.Index = undefined;
-            const fn_proto = tree.fullFnProto(&buf, node).?;
+                                      return Type.fromIP(analyser, .type_type, vector_ty_ip_index);
+                                  },
+                                  else => {
+                                      const data = version_data.builtins.get(call_name) orelse return null;
+                                      return analyser.resolveLangrefType(data.return_type);
+                                  },
+                              }
+                          },
+                          .fn_proto,
+                          .fn_proto_multi,
+                          .fn_proto_one,
+                          .fn_proto_simple,
+                          .fn_decl,
+                          => {
+                              var buf: [1]Ast.Node.Index = undefined;
+                              const fn_proto = tree.fullFnProto(&buf, node).?;
 
-            const container_type = options.container_type orelse try analyser.innermostContainer(handle, tree.tokenStart(fn_proto.ast.fn_token));
-            const doc_comments = try getDocComments(analyser.arena, tree, node);
-            const name = if (fn_proto.name_token) |t| tree.tokenSlice(t) else null;
+                              const container_type = options.container_type orelse try analyser.innermostContainer(handle, tree.tokenStart(fn_proto.ast.fn_token));
+                              const doc_comments = try getDocComments(analyser.arena, tree, node);
+                              const name = if (fn_proto.name_token) |t| tree.tokenSlice(t) else null;
 
-            var parameters: std.ArrayList(Type.Data.Parameter) = .empty;
-            var has_varargs = false;
+                              var parameters: std.ArrayList(Type.Data.Parameter) = .empty;
+                              var has_varargs = false;
 
-            var it: ast.FnParamIterator = .init(&fn_proto, tree);
-            while (it.next()) |param| {
-                if (has_varargs) {
-                    return null;
-                }
+                              var it: ast.FnParamIterator = .init(&fn_proto, tree);
+                              while (it.next()) |param| {
+                                  if (has_varargs) {
+                                      return null;
+                                  }
 
-                var param_comments: ?[]const u8 = null;
-                if (param.first_doc_comment) |dc| {
-                    param_comments = try collectDocComments(analyser.arena, tree, dc, false);
-                }
+                                  var param_comments: ?[]const u8 = null;
+                                  if (param.first_doc_comment) |dc| {
+                                      param_comments = try collectDocComments(analyser.arena, tree, dc, false);
+                                  }
 
-                var param_modifier: ?Type.Data.Parameter.Modifier = null;
-                if (param.comptime_noalias) |token_index| {
-                    switch (tree.tokenTag(token_index)) {
-                        .keyword_comptime => param_modifier = .comptime_param,
-                        .keyword_noalias => param_modifier = .noalias_param,
-                        else => unreachable,
-                    }
-                }
+                                  var param_modifier: ?Type.Data.Parameter.Modifier = null;
+                                  if (param.comptime_noalias) |token_index| {
+                                      switch (tree.tokenTag(token_index)) {
+                                          .keyword_comptime => param_modifier = .comptime_param,
+                                          .keyword_noalias => param_modifier = .noalias_param,
+                                          else => unreachable,
+                                      }
+                                  }
 
-                var param_name: ?[]const u8 = null;
-                if (param.name_token) |name_token| {
-                    param_name = tree.tokenSlice(name_token);
-                }
+                                  var param_name: ?[]const u8 = null;
+                                  if (param.name_token) |name_token| {
+                                      param_name = tree.tokenSlice(name_token);
+                                  }
 
-                const param_type: Type = param_type: {
-                    if (param.type_expr) |type_expr| blk: {
-                        const ty = try analyser.resolveTypeOfNode(.of(type_expr, handle)) orelse {
-                            break :blk;
-                        };
-                        if (!ty.is_type_val) {
-                            break :blk;
-                        }
-                        break :param_type ty;
-                    }
-                    if (param.anytype_ellipsis3) |token_index| {
-                        switch (tree.tokenTag(token_index)) {
-                            .keyword_anytype => {
-                                break :param_type .{
-                                    .data = .{
-                                        .anytype_parameter = .{
-                                            .token_handle = .{ .token = token_index, .handle = handle },
-                                            .type_from_callsite_references = null,
-                                        },
+                                  const param_type: Type = param_type: {
+                                      if (param.type_expr) |type_expr| blk: {
+                                          const ty = try analyser.resolveTypeOfNode(.of(type_expr, handle)) orelse {
+                                              break :blk;
+                                          };
+                                          if (!ty.is_type_val) {
+                                              break :blk;
+                                          }
+                                          break :param_type ty;
+                                      }
+                                      if (param.anytype_ellipsis3) |token_index| {
+                                          switch (tree.tokenTag(token_index)) {
+                                              .keyword_anytype => {
+                                                  break :param_type .{
+                                                      .data = .{
+                                                          .anytype_parameter = .{
+                                                              .token_handle = .{ .token = token_index, .handle = handle },
+                                                              .type_from_callsite_references = null,
+                                                          },
+                                                          },
+                                                      .is_type_val = true,
+                                                  };
+                                              },
+                                              .ellipsis3 => {
+                                                  has_varargs = true;
+                                                  continue;
+                                              },
+                                              else => unreachable,
+                                          }
+                                      }
+                                      break :param_type .unknown_type;
+                                  };
+
+                                  try parameters.append(analyser.arena, .{
+                                      .doc_comments = param_comments,
+                                      .modifier = param_modifier,
+                                      .name = param_name,
+                                      .name_token = param.name_token,
+                                      .type = param_type,
+                                  });
+                              }
+
+                              const return_value = try analyser.resolveReturnValueOfFuncNode(handle, node) orelse
+                                  Type.fromIP(analyser, .unknown_type, null);
+
+                              const info: Type.Data.Function = .{
+                                  .handle = handle,
+                                  .fn_token = fn_proto.ast.fn_token,
+                                  .container_type = try analyser.allocType(container_type),
+                                  .doc_comments = doc_comments,
+                                  .name = name,
+                                  .parameters = parameters.items,
+                                  .has_varargs = has_varargs,
+                                  .return_value = try analyser.allocType(return_value),
+                              };
+
+                              // This is a function type
+                              if (fn_proto.name_token == null) {
+                                  return .{ .data = .{ .function = info }, .is_type_val = true };
+                              }
+
+                              return .{ .data = .{ .function = info }, .is_type_val = false };
+                          },
+                          .@"if", .if_simple => {
+                              const if_node = ast.fullIf(tree, node).?;
+
+                              var either_buffer: [2]Type.TypeWithDescriptor = undefined;
+                              var either: std.ArrayList(Type.TypeWithDescriptor) = .initBuffer(&either_buffer);
+
+                              if (try analyser.resolveTypeOfNodeInternal(.of(if_node.ast.then_expr, handle))) |t| {
+                                  either.appendAssumeCapacity(.{ .type = t, .descriptor = offsets.nodeToSlice(tree, if_node.ast.cond_expr) });
+                              }
+                              if (if_node.ast.else_expr.unwrap()) |else_expr| {
+                                  if (try analyser.resolveTypeOfNodeInternal(.of(else_expr, handle))) |t| {
+                                      either.appendAssumeCapacity(.{ .type = t, .descriptor = try std.fmt.allocPrint(analyser.arena, "!({s})", .{offsets.nodeToSlice(tree, if_node.ast.cond_expr)}) });
+                                  }
+                              }
+                              return Type.fromEither(analyser, either.items);
+                          },
+                          .@"switch",
+                          .switch_comma,
+                          => {
+                              const switch_node = tree.switchFull(node);
+
+                              var either: std.ArrayList(Type.TypeWithDescriptor) = .empty;
+
+                              if (switch_node.label_token) |label_token| {
+                                  var it: BreakIterator = .{
+                                      .walker = try .init(analyser.gpa, tree, node),
+                                      .label = offsets.identifierTokenToNameSlice(tree, label_token),
+                                      .allow_unlabeled = false,
+                                  };
+                                  defer it.walker.deinit(analyser.gpa);
+                                  while (try it.next(analyser.gpa, tree)) |operand| {
+                                      if (try analyser.resolveTypeOfNodeInternal(.of(operand, handle))) |operand_type| {
+                                          try either.append(analyser.arena, .{
+                                              .type = operand_type,
+                                              .descriptor = "break",
+                                          });
+                                      }
+                                  }
+                              }
+
+                              for (switch_node.ast.cases) |case| {
+                                  const switch_case = tree.fullSwitchCase(case).?;
+                                  var descriptor: std.ArrayList(u8) = .empty;
+
+                                  for (switch_case.ast.values, 0..) |values, index| {
+                                      try descriptor.appendSlice(analyser.arena, offsets.nodeToSlice(tree, values));
+                                      if (index != switch_case.ast.values.len - 1) try descriptor.appendSlice(analyser.arena, ", ");
+                                  }
+
+                                  if (try analyser.resolveTypeOfNodeInternal(.of(switch_case.ast.target_expr, handle))) |t|
+                                      try either.append(analyser.arena, .{
+                                          .type = t,
+                                          .descriptor = try descriptor.toOwnedSlice(analyser.arena),
+                                      });
+                              }
+
+                              return Type.fromEither(analyser, either.items);
+                          },
+                          .@"while",
+                          .while_simple,
+                          .while_cont,
+                          .@"for",
+                          .for_simple,
+                          => {
+                              const loop: struct {
+                                  label_token: ?Ast.TokenIndex,
+                                  then_expr: Ast.Node.Index,
+                                  else_expr: Ast.Node.OptionalIndex,
+                              } = if (ast.fullWhile(tree, node)) |while_node|
+                              .{
+                                  .label_token = while_node.label_token,
+                                  .then_expr = while_node.ast.then_expr,
+                                  .else_expr = while_node.ast.else_expr,
+                              }
+                              else if (ast.fullFor(tree, node)) |for_node|
+                                  .{
+                                      .label_token = for_node.label_token,
+                                      .then_expr = for_node.ast.then_expr,
+                                      .else_expr = for_node.ast.else_expr,
+                                  }
+                              else
+                                  unreachable;
+
+                              const else_expr = loop.else_expr.unwrap() orelse return null;
+
+                              // TODO: peer type resolution based on `else` and all `break` statements
+                              if (try analyser.resolveTypeOfNodeInternal(.of(else_expr, handle))) |else_type|
+                                  return else_type.withoutIPIndex(analyser);
+
+                              var it: BreakIterator = .{
+                                  .walker = try .init(analyser.gpa, tree, loop.then_expr),
+                                  .label = if (loop.label_token) |token| offsets.identifierTokenToNameSlice(tree, token) else null,
+                                  .allow_unlabeled = true,
+                              };
+                              defer it.walker.deinit(analyser.gpa);
+
+                              while (try it.next(analyser.gpa, tree)) |operand| {
+                                  if (try analyser.resolveTypeOfNodeInternal(.of(operand, handle))) |operand_type|
+                                      return operand_type;
+                              }
+                          },
+                          .block,
+                          .block_semicolon,
+                          .block_two,
+                          .block_two_semicolon,
+                          => {
+                              var buffer: [2]Ast.Node.Index = undefined;
+                              const statements = tree.blockStatements(&buffer, node).?;
+                              if (statements.len == 0) {
+                                  return Type.fromIP(analyser, .void_type, .void_value);
+                              }
+
+                              const label_token = ast.blockLabel(tree, node) orelse {
+                                  const last_statement = statements[statements.len - 1];
+                                  if (try analyser.resolveTypeOfNodeInternal(.of(last_statement, handle))) |ty| {
+                                      if ((try ty.typeOf(analyser)).isNoreturnType()) {
+                                          return Type.fromIP(analyser, .noreturn_type, null);
+                                      }
+                                  }
+                                  return Type.fromIP(analyser, .void_type, .void_value);
+                              };
+
+                              // TODO: peer type resolution based on all `break` statements
+                              var it: BreakIterator = .{
+                                  .walker = try .init(analyser.gpa, tree, node),
+                                  .label = offsets.identifierTokenToNameSlice(tree, label_token),
+                                  .allow_unlabeled = false,
+                              };
+                              defer it.walker.deinit(analyser.gpa);
+
+                              while (try it.next(analyser.gpa, tree)) |operand| {
+                                  if (try analyser.resolveTypeOfNodeInternal(.of(operand, handle))) |operand_type|
+                                      return operand_type.withoutIPIndex(analyser);
+                              }
+                          },
+
+                          .for_range => {},
+
+                          .equal_equal,
+                          .bang_equal,
+                          .less_than,
+                          .greater_than,
+                          .less_or_equal,
+                          .greater_or_equal,
+                          => {
+                              const lhs, _ = tree.nodeData(node).node_and_node;
+
+                              const ty = try analyser.resolveTypeOfNodeInternal(.of(lhs, handle)) orelse
+                                  return Type.fromIP(analyser, .bool_type, null);
+                              const typeof = try ty.typeOf(analyser);
+
+                              if (typeof.ipIndex()) |index| {
+                                  const key = analyser.ip.indexToKey(index);
+                                  if (key == .vector_type) {
+                                      const vector_ty_ip_index = try analyser.ip.get(.{
+                                          .vector_type = .{
+                                              .len = key.vector_type.len,
+                                              .child = .bool_type,
+                                          },
+                                          });
+
+                                      return Type.fromIP(analyser, vector_ty_ip_index, null);
+                                  }
+                              }
+                              return Type.fromIP(analyser, .bool_type, null);
+                          },
+
+                          .bool_and,
+                          .bool_or,
+                          .bool_not,
+                          => return Type.fromIP(analyser, .bool_type, null),
+
+                          .bit_not,
+                          .negation,
+                          .negation_wrap,
+                          => {
+                              const ty = try analyser.resolveTypeOfNodeInternal(.of(tree.nodeData(node).node, handle)) orelse return null;
+                              if (ty.is_type_val) return null;
+                              return ty.withoutIPIndex(analyser);
+                          },
+
+                          .multiline_string_literal => {
+                              const start, const end = tree.nodeData(node).token_and_token;
+
+                              var length: u64 = 0;
+
+                              for (start..end + 1, 0..) |token_index, i| {
+                                  const slice = tree.tokenSlice(@intCast(token_index));
+                                  length += slice.len - 2 + @intFromBool(i != 0);
+                              }
+
+                              const string_literal_type = try analyser.ip.get(.{ .pointer_type = .{
+                                  .elem_type = try analyser.ip.get(.{ .array_type = .{
+                                      .child = .u8_type,
+                                      .len = length,
+                                      .sentinel = .zero_u8,
+                                  } }),
+                                  .flags = .{
+                                      .size = .one,
+                                      .is_const = true,
+                                  },
+                                  } });
+                              return Type.fromIP(analyser, string_literal_type, null);
+                          },
+                          .string_literal => {
+                              const token_bytes = tree.tokenSlice(tree.nodeMainToken(node));
+
+                              var discarding_writer: std.Io.Writer.Discarding = .init(&.{});
+                              const result = std.zig.string_literal.parseWrite(&discarding_writer.writer, token_bytes) catch |err| switch (err) {
+                                  error.WriteFailed => unreachable,
+                              };
+                              switch (result) {
+                                  .success => {},
+                                  .failure => return null,
+                              }
+
+                              const string_literal_type = try analyser.ip.get(.{ .pointer_type = .{
+                                  .elem_type = try analyser.ip.get(.{ .array_type = .{
+                                      .child = .u8_type,
+                                      .len = discarding_writer.count,
+                                      .sentinel = .zero_u8,
+                                  } }),
+                                  .flags = .{
+                                      .size = .one,
+                                      .is_const = true,
+                                  },
+                                  } });
+                              return Type.fromIP(analyser, string_literal_type, null);
+                          },
+                          .error_value => {
+                              const name_token = tree.nodeMainToken(node) + 2;
+                              if (tree.tokenTag(name_token) != .identifier) return null;
+                              const name = offsets.identifierTokenToNameSlice(tree, name_token);
+                              const name_index = try analyser.ip.string_pool.getOrPutString(analyser.store.io, analyser.gpa, name);
+
+                              const error_set_type = try analyser.ip.get(.{ .error_set_type = .{
+                                  .owner_decl = .none,
+                                  .names = try analyser.ip.getStringSlice(&.{name_index}),
+                              } });
+                              const error_value = try analyser.ip.get(.{ .error_value = .{
+                                  .ty = error_set_type,
+                                  .error_tag_name = name_index,
+                              } });
+                              return Type.fromIP(analyser, error_set_type, error_value);
+                          },
+
+                          .char_literal => return Type.fromIP(analyser, .comptime_int_type, null),
+
+                          .number_literal => {
+                              const bytes = offsets.tokenToSlice(tree, tree.nodeMainToken(node));
+                              const result = std.zig.parseNumberLiteral(bytes);
+                              const ty: InternPool.Index = switch (result) {
+                                  .int,
+                                  .big_int,
+                                  => .comptime_int_type,
+                                  .float => .comptime_float_type,
+                                  .failure => return null,
+                              };
+                              if (!analyser.resolve_number_literal_values) {
+                                  return Type.fromIP(analyser, ty, null);
+                              }
+                              const value: ?InternPool.Index = switch (result) {
+                                  .float => blk: {
+                                      break :blk try analyser.ip.get(
+                                                 .{ .float_comptime_value = std.fmt.parseFloat(f128, bytes) catch break :blk null },
+                                             );
+                                         },
+                                         .int => blk: {
+                                             break :blk if (bytes[0] == '-')
+                                                 try analyser.ip.get(
+                                                     .{ .int_i64_value = .{ .ty = ty, .int = std.fmt.parseInt(i64, bytes, 0) catch break :blk null } },
+                                                 )
+                                                 else
+                                                     try analyser.ip.get(
+                                                         .{ .int_u64_value = .{ .ty = ty, .int = std.fmt.parseInt(u64, bytes, 0) catch break :blk null } },
+                                                     );
+                                                 },
+                                                 .big_int => |base| blk: {
+                                                     var big_int: std.math.big.int.Managed = try .init(analyser.gpa);
+                                                     defer big_int.deinit();
+                                                     const prefix_length: usize = if (base != .decimal) 2 else 0;
+                                                     big_int.setString(@intFromEnum(base), bytes[prefix_length..]) catch |err| switch (err) {
+                                                         error.OutOfMemory => return error.OutOfMemory,
+                                                         else => break :blk null,
+                                                     };
+                                                     std.debug.assert(ty == .comptime_int_type);
+                                                     break :blk try analyser.ip.getBigInt(ty, big_int.toConst());
+                                                 },
+                                                 .failure => unreachable, // checked above
+                                             };
+
+                              return if (value) |v| Type.fromIP(analyser, ty, v) else Type.fromIP(analyser, ty, null);
+                          },
+
+                          .enum_literal => {
+                              const source_token = tree.tokenStart(tree.nodeMainToken(node));
+                              const lineage = try ast.nodesOverlappingIndex(analyser.arena, tree, source_token);
+                              defer analyser.arena.free(lineage);
+
+                              const tag = offsets.identifierTokenToNameSlice(tree, tree.nodeMainToken(node));
+                              const decl = (try analyser.lookupSymbolFieldInit(handle, tag, node, lineage[1..])) orelse return Type.fromIP(analyser, .enum_literal_type, null);
+                              return decl.resolveType(analyser);
+                          },
+
+                          .unreachable_literal => return Type.fromIP(analyser, .noreturn_type, null),
+                          .anyframe_literal => return Type.fromIP(analyser, .anyframe_type, null),
+
+                          .anyframe_type => return .unknown_type,
+
+                          .mul,
+                          .div,
+                          .mod,
+                          .mul_wrap,
+                          .mul_sat,
+                          .add_wrap,
+                          .sub_wrap,
+                          .add_sat,
+                          .sub_sat,
+                          .bit_and,
+                          .bit_xor,
+                          .bit_or,
+                          => {
+                              const lhs, const rhs = tree.nodeData(node).node_and_node;
+                              var lhs_ty = try analyser.resolveTypeOfNodeInternal(.of(lhs, handle)) orelse return null;
+                              if (lhs_ty.is_type_val) return null;
+                              var rhs_ty = try analyser.resolveTypeOfNodeInternal(.of(rhs, handle)) orelse return null;
+                              if (rhs_ty.is_type_val) return null;
+                              lhs_ty = lhs_ty.withoutIPIndex(analyser);
+                              rhs_ty = rhs_ty.withoutIPIndex(analyser);
+                              return analyser.resolvePeerTypes(lhs_ty, rhs_ty);
+                          },
+
+                          .add => {
+                              const lhs, const rhs = tree.nodeData(node).node_and_node;
+                              var lhs_ty = try analyser.resolveTypeOfNodeInternal(.of(lhs, handle)) orelse return null;
+                              if (lhs_ty.is_type_val) return null;
+                              var rhs_ty = try analyser.resolveTypeOfNodeInternal(.of(rhs, handle)) orelse return null;
+                              if (rhs_ty.is_type_val) return null;
+                              lhs_ty = lhs_ty.withoutIPIndex(analyser);
+                              rhs_ty = rhs_ty.withoutIPIndex(analyser);
+                              if (lhs_ty.pointerSize(analyser)) |lhs_size| {
+                                  return switch (lhs_size) {
+                                      .many, .c => lhs_ty,
+                                      else => null,
+                                  };
+                              }
+                              return try analyser.resolvePeerTypes(lhs_ty, rhs_ty);
+                          },
+
+                          .sub => {
+                              const lhs, const rhs = tree.nodeData(node).node_and_node;
+                              var lhs_ty = try analyser.resolveTypeOfNodeInternal(.of(lhs, handle)) orelse return null;
+                              if (lhs_ty.is_type_val) return null;
+                              var rhs_ty = try analyser.resolveTypeOfNodeInternal(.of(rhs, handle)) orelse return null;
+                              if (rhs_ty.is_type_val) return null;
+                              lhs_ty = lhs_ty.withoutIPIndex(analyser);
+                              rhs_ty = rhs_ty.withoutIPIndex(analyser);
+                              if (lhs_ty.pointerSize(analyser)) |lhs_size| {
+                                  if (rhs_ty.pointerSize(analyser)) |rhs_size| {
+                                      if (lhs_size == .slice) return null;
+                                      if (rhs_size == .slice) return null;
+                                      return Type.fromIP(analyser, .usize_type, null);
+                                  } else {
+                                      return switch (lhs_size) {
+                                          .many, .c => lhs_ty,
+                                          else => null,
+                                      };
+                                  }
+                              }
+                              return try analyser.resolvePeerTypes(lhs_ty, rhs_ty);
+                          },
+
+                          .shl,
+                          .shl_sat,
+                          .shr,
+                          => {
+                              const lhs, _ = tree.nodeData(node).node_and_node;
+                              const lhs_ty = try analyser.resolveTypeOfNodeInternal(.of(lhs, handle)) orelse return null;
+                              if (lhs_ty.is_type_val) return null;
+                              return lhs_ty.withoutIPIndex(analyser);
+                          },
+
+                          .array_mult => {
+                              const elem_idx, const mult_idx = tree.nodeData(node).node_and_node;
+
+                              var elem_ty = try analyser.resolveTypeOfNodeInternal(.of(elem_idx, handle)) orelse return null;
+                              if (elem_ty.is_type_val) return null;
+
+                              const mult_lit = try analyser.resolveIntegerLiteral(u64, .of(mult_idx, handle));
+
+                              blk: {
+                                  elem_ty = elem_ty.pointerElementType(analyser, .one) orelse break :blk;
+                                  elem_ty = try elem_ty.instanceUnchecked(analyser);
+                                  elem_ty = try analyser.resolveArrayMult(elem_ty, mult_lit) orelse return null;
+                                  elem_ty = try elem_ty.typeOf(analyser);
+                                  const pointer_ty = try Type.createPointerType(analyser, .one, .none, true, elem_ty);
+                                  return try pointer_ty.instanceUnchecked(analyser);
+                              }
+
+                                   return try analyser.resolveArrayMult(elem_ty, mult_lit);
+                               },
+                               .array_cat => {
+                                   const l_elem_idx, const r_elem_idx = tree.nodeData(node).node_and_node;
+
+                                   var l_elem_ty = try analyser.resolveTypeOfNodeInternal(.of(l_elem_idx, handle)) orelse return null;
+                                   if (l_elem_ty.is_type_val) return null;
+
+                                   var r_elem_ty = try analyser.resolveTypeOfNodeInternal(.of(r_elem_idx, handle)) orelse return null;
+                                   if (r_elem_ty.is_type_val) return null;
+
+                                   blk: {
+                                       l_elem_ty = l_elem_ty.pointerElementType(analyser, .one) orelse break :blk;
+                                       r_elem_ty = r_elem_ty.pointerElementType(analyser, .one) orelse break :blk;
+                                       l_elem_ty = try l_elem_ty.instanceUnchecked(analyser);
+                                       r_elem_ty = try r_elem_ty.instanceUnchecked(analyser);
+                                       var elem_ty = try analyser.resolveArrayCat(l_elem_ty, r_elem_ty) orelse return null;
+                                       elem_ty = try elem_ty.typeOf(analyser);
+                                       const pointer_ty = try Type.createPointerType(analyser, .one, .none, true, elem_ty);
+                                       return try pointer_ty.instanceUnchecked(analyser);
+                                   }
+
+                                        return try analyser.resolveArrayCat(l_elem_ty, r_elem_ty);
                                     },
-                                    .is_type_val = true,
-                                };
-                            },
-                            .ellipsis3 => {
-                                has_varargs = true;
-                                continue;
-                            },
-                            else => unreachable,
-                        }
-                    }
-                    break :param_type .unknown_type;
-                };
 
-                try parameters.append(analyser.arena, .{
-                    .doc_comments = param_comments,
-                    .modifier = param_modifier,
-                    .name = param_name,
-                    .name_token = param.name_token,
-                    .type = param_type,
-                });
-            }
+                                    .assign_mul,
+                                    .assign_div,
+                                    .assign_mod,
+                                    .assign_add,
+                                    .assign_sub,
+                                    .assign_shl,
+                                    .assign_shl_sat,
+                                    .assign_shr,
+                                    .assign_bit_and,
+                                    .assign_bit_xor,
+                                    .assign_bit_or,
+                                    .assign_mul_wrap,
+                                    .assign_add_wrap,
+                                    .assign_sub_wrap,
+                                    .assign_mul_sat,
+                                    .assign_add_sat,
+                                    .assign_sub_sat,
+                                    .assign,
+                                    .assign_destructure,
+                                    => {},
 
-            const return_value = try analyser.resolveReturnValueOfFuncNode(handle, node) orelse
-                Type.fromIP(analyser, .unknown_type, null);
+                                    .struct_init_dot_two,
+                                    .struct_init_dot_two_comma,
+                                    .struct_init_dot,
+                                    .struct_init_dot_comma,
+                                    => {},
 
-            const info: Type.Data.Function = .{
-                .handle = handle,
-                .fn_token = fn_proto.ast.fn_token,
-                .container_type = try analyser.allocType(container_type),
-                .doc_comments = doc_comments,
-                .name = name,
-                .parameters = parameters.items,
-                .has_varargs = has_varargs,
-                .return_value = try analyser.allocType(return_value),
-            };
+                                    .root,
+                                    .test_decl,
+                                    .@"errdefer",
+                                    .@"defer",
+                                    .switch_case_one,
+                                    .switch_case_inline_one,
+                                    .switch_case,
+                                    .switch_case_inline,
+                                    .switch_range,
+                                    => {},
+                                    .@"continue",
+                                    .@"break",
+                                    .@"return",
+                                    => {
+                                        return Type.fromIP(analyser, .noreturn_type, null);
+                                    },
 
-            // This is a function type
-            if (fn_proto.name_token == null) {
-                return .{ .data = .{ .function = info }, .is_type_val = true };
-            }
+                                    .@"suspend",
+                                    .@"resume",
+                                    => {},
 
-            return .{ .data = .{ .function = info }, .is_type_val = false };
-        },
-        .@"if", .if_simple => {
-            const if_node = ast.fullIf(tree, node).?;
+                                    .asm_simple,
+                                    .@"asm",
+                                    .asm_output,
+                                    .asm_input,
+                                    => {},
 
-            var either_buffer: [2]Type.TypeWithDescriptor = undefined;
-            var either: std.ArrayList(Type.TypeWithDescriptor) = .initBuffer(&either_buffer);
-
-            if (try analyser.resolveTypeOfNodeInternal(.of(if_node.ast.then_expr, handle))) |t| {
-                either.appendAssumeCapacity(.{ .type = t, .descriptor = offsets.nodeToSlice(tree, if_node.ast.cond_expr) });
-            }
-            if (if_node.ast.else_expr.unwrap()) |else_expr| {
-                if (try analyser.resolveTypeOfNodeInternal(.of(else_expr, handle))) |t| {
-                    either.appendAssumeCapacity(.{ .type = t, .descriptor = try std.fmt.allocPrint(analyser.arena, "!({s})", .{offsets.nodeToSlice(tree, if_node.ast.cond_expr)}) });
-                }
-            }
-            return Type.fromEither(analyser, either.items);
-        },
-        .@"switch",
-        .switch_comma,
-        => {
-            const switch_node = tree.switchFull(node);
-
-            var either: std.ArrayList(Type.TypeWithDescriptor) = .empty;
-
-            if (switch_node.label_token) |label_token| {
-                var it: BreakIterator = .{
-                    .walker = try .init(analyser.gpa, tree, node),
-                    .label = offsets.identifierTokenToNameSlice(tree, label_token),
-                    .allow_unlabeled = false,
-                };
-                defer it.walker.deinit(analyser.gpa);
-                while (try it.next(analyser.gpa, tree)) |operand| {
-                    if (try analyser.resolveTypeOfNodeInternal(.of(operand, handle))) |operand_type| {
-                        try either.append(analyser.arena, .{
-                            .type = operand_type,
-                            .descriptor = "break",
-                        });
-                    }
-                }
-            }
-
-            for (switch_node.ast.cases) |case| {
-                const switch_case = tree.fullSwitchCase(case).?;
-                var descriptor: std.ArrayList(u8) = .empty;
-
-                for (switch_case.ast.values, 0..) |values, index| {
-                    try descriptor.appendSlice(analyser.arena, offsets.nodeToSlice(tree, values));
-                    if (index != switch_case.ast.values.len - 1) try descriptor.appendSlice(analyser.arena, ", ");
-                }
-
-                if (try analyser.resolveTypeOfNodeInternal(.of(switch_case.ast.target_expr, handle))) |t|
-                    try either.append(analyser.arena, .{
-                        .type = t,
-                        .descriptor = try descriptor.toOwnedSlice(analyser.arena),
-                    });
-            }
-
-            return Type.fromEither(analyser, either.items);
-        },
-        .@"while",
-        .while_simple,
-        .while_cont,
-        .@"for",
-        .for_simple,
-        => {
-            const loop: struct {
-                label_token: ?Ast.TokenIndex,
-                then_expr: Ast.Node.Index,
-                else_expr: Ast.Node.OptionalIndex,
-            } = if (ast.fullWhile(tree, node)) |while_node|
-                .{
-                    .label_token = while_node.label_token,
-                    .then_expr = while_node.ast.then_expr,
-                    .else_expr = while_node.ast.else_expr,
-                }
-            else if (ast.fullFor(tree, node)) |for_node|
-                .{
-                    .label_token = for_node.label_token,
-                    .then_expr = for_node.ast.then_expr,
-                    .else_expr = for_node.ast.else_expr,
-                }
-            else
-                unreachable;
-
-            const else_expr = loop.else_expr.unwrap() orelse return null;
-
-            // TODO: peer type resolution based on `else` and all `break` statements
-            if (try analyser.resolveTypeOfNodeInternal(.of(else_expr, handle))) |else_type|
-                return else_type.withoutIPIndex(analyser);
-
-            var it: BreakIterator = .{
-                .walker = try .init(analyser.gpa, tree, loop.then_expr),
-                .label = if (loop.label_token) |token| offsets.identifierTokenToNameSlice(tree, token) else null,
-                .allow_unlabeled = true,
-            };
-            defer it.walker.deinit(analyser.gpa);
-
-            while (try it.next(analyser.gpa, tree)) |operand| {
-                if (try analyser.resolveTypeOfNodeInternal(.of(operand, handle))) |operand_type|
-                    return operand_type;
-            }
-        },
-        .block,
-        .block_semicolon,
-        .block_two,
-        .block_two_semicolon,
-        => {
-            var buffer: [2]Ast.Node.Index = undefined;
-            const statements = tree.blockStatements(&buffer, node).?;
-            if (statements.len == 0) {
-                return Type.fromIP(analyser, .void_type, .void_value);
-            }
-
-            const label_token = ast.blockLabel(tree, node) orelse {
-                const last_statement = statements[statements.len - 1];
-                if (try analyser.resolveTypeOfNodeInternal(.of(last_statement, handle))) |ty| {
-                    if ((try ty.typeOf(analyser)).isNoreturnType()) {
-                        return Type.fromIP(analyser, .noreturn_type, null);
-                    }
-                }
-                return Type.fromIP(analyser, .void_type, .void_value);
-            };
-
-            // TODO: peer type resolution based on all `break` statements
-            var it: BreakIterator = .{
-                .walker = try .init(analyser.gpa, tree, node),
-                .label = offsets.identifierTokenToNameSlice(tree, label_token),
-                .allow_unlabeled = false,
-            };
-            defer it.walker.deinit(analyser.gpa);
-
-            while (try it.next(analyser.gpa, tree)) |operand| {
-                if (try analyser.resolveTypeOfNodeInternal(.of(operand, handle))) |operand_type|
-                    return operand_type.withoutIPIndex(analyser);
-            }
-        },
-
-        .for_range => {},
-
-        .equal_equal,
-        .bang_equal,
-        .less_than,
-        .greater_than,
-        .less_or_equal,
-        .greater_or_equal,
-        => {
-            const lhs, _ = tree.nodeData(node).node_and_node;
-
-            const ty = try analyser.resolveTypeOfNodeInternal(.of(lhs, handle)) orelse
-                return Type.fromIP(analyser, .bool_type, null);
-            const typeof = try ty.typeOf(analyser);
-
-            if (typeof.ipIndex()) |index| {
-                const key = analyser.ip.indexToKey(index);
-                if (key == .vector_type) {
-                    const vector_ty_ip_index = try analyser.ip.get(.{
-                        .vector_type = .{
-                            .len = key.vector_type.len,
-                            .child = .bool_type,
-                        },
-                    });
-
-                    return Type.fromIP(analyser, vector_ty_ip_index, null);
-                }
-            }
-            return Type.fromIP(analyser, .bool_type, null);
-        },
-
-        .bool_and,
-        .bool_or,
-        .bool_not,
-        => return Type.fromIP(analyser, .bool_type, null),
-
-        .bit_not,
-        .negation,
-        .negation_wrap,
-        => {
-            const ty = try analyser.resolveTypeOfNodeInternal(.of(tree.nodeData(node).node, handle)) orelse return null;
-            if (ty.is_type_val) return null;
-            return ty.withoutIPIndex(analyser);
-        },
-
-        .multiline_string_literal => {
-            const start, const end = tree.nodeData(node).token_and_token;
-
-            var length: u64 = 0;
-
-            for (start..end + 1, 0..) |token_index, i| {
-                const slice = tree.tokenSlice(@intCast(token_index));
-                length += slice.len - 2 + @intFromBool(i != 0);
-            }
-
-            const string_literal_type = try analyser.ip.get(.{ .pointer_type = .{
-                .elem_type = try analyser.ip.get(.{ .array_type = .{
-                    .child = .u8_type,
-                    .len = length,
-                    .sentinel = .zero_u8,
-                } }),
-                .flags = .{
-                    .size = .one,
-                    .is_const = true,
-                },
-            } });
-            return Type.fromIP(analyser, string_literal_type, null);
-        },
-        .string_literal => {
-            const token_bytes = tree.tokenSlice(tree.nodeMainToken(node));
-
-            var discarding_writer: std.Io.Writer.Discarding = .init(&.{});
-            const result = std.zig.string_literal.parseWrite(&discarding_writer.writer, token_bytes) catch |err| switch (err) {
-                error.WriteFailed => unreachable,
-            };
-            switch (result) {
-                .success => {},
-                .failure => return null,
-            }
-
-            const string_literal_type = try analyser.ip.get(.{ .pointer_type = .{
-                .elem_type = try analyser.ip.get(.{ .array_type = .{
-                    .child = .u8_type,
-                    .len = discarding_writer.count,
-                    .sentinel = .zero_u8,
-                } }),
-                .flags = .{
-                    .size = .one,
-                    .is_const = true,
-                },
-            } });
-            return Type.fromIP(analyser, string_literal_type, null);
-        },
-        .error_value => {
-            const name_token = tree.nodeMainToken(node) + 2;
-            if (tree.tokenTag(name_token) != .identifier) return null;
-            const name = offsets.identifierTokenToNameSlice(tree, name_token);
-            const name_index = try analyser.ip.string_pool.getOrPutString(analyser.store.io, analyser.gpa, name);
-
-            const error_set_type = try analyser.ip.get(.{ .error_set_type = .{
-                .owner_decl = .none,
-                .names = try analyser.ip.getStringSlice(&.{name_index}),
-            } });
-            const error_value = try analyser.ip.get(.{ .error_value = .{
-                .ty = error_set_type,
-                .error_tag_name = name_index,
-            } });
-            return Type.fromIP(analyser, error_set_type, error_value);
-        },
-
-        .char_literal => return Type.fromIP(analyser, .comptime_int_type, null),
-
-        .number_literal => {
-            const bytes = offsets.tokenToSlice(tree, tree.nodeMainToken(node));
-            const result = std.zig.parseNumberLiteral(bytes);
-            const ty: InternPool.Index = switch (result) {
-                .int,
-                .big_int,
-                => .comptime_int_type,
-                .float => .comptime_float_type,
-                .failure => return null,
-            };
-            if (!analyser.resolve_number_literal_values) {
-                return Type.fromIP(analyser, ty, null);
-            }
-            const value: ?InternPool.Index = switch (result) {
-                .float => blk: {
-                    break :blk try analyser.ip.get(
-                        .{ .float_comptime_value = std.fmt.parseFloat(f128, bytes) catch break :blk null },
-                    );
-                },
-                .int => blk: {
-                    break :blk if (bytes[0] == '-')
-                        try analyser.ip.get(
-                            .{ .int_i64_value = .{ .ty = ty, .int = std.fmt.parseInt(i64, bytes, 0) catch break :blk null } },
-                        )
-                    else
-                        try analyser.ip.get(
-                            .{ .int_u64_value = .{ .ty = ty, .int = std.fmt.parseInt(u64, bytes, 0) catch break :blk null } },
-                        );
-                },
-                .big_int => |base| blk: {
-                    var big_int: std.math.big.int.Managed = try .init(analyser.gpa);
-                    defer big_int.deinit();
-                    const prefix_length: usize = if (base != .decimal) 2 else 0;
-                    big_int.setString(@intFromEnum(base), bytes[prefix_length..]) catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        else => break :blk null,
-                    };
-                    std.debug.assert(ty == .comptime_int_type);
-                    break :blk try analyser.ip.getBigInt(ty, big_int.toConst());
-                },
-                .failure => unreachable, // checked above
-            };
-
-            return if (value) |v| Type.fromIP(analyser, ty, v) else Type.fromIP(analyser, ty, null);
-        },
-
-        .enum_literal => {
-            const source_token = tree.tokenStart(tree.nodeMainToken(node));
-            const lineage = try ast.nodesOverlappingIndex(analyser.arena, tree, source_token);
-            defer analyser.arena.free(lineage);
-
-            const tag = offsets.identifierTokenToNameSlice(tree, tree.nodeMainToken(node));
-            const decl = (try analyser.lookupSymbolFieldInit(handle, tag, node, lineage[1..])) orelse return Type.fromIP(analyser, .enum_literal_type, null);
-            return decl.resolveType(analyser);
-        },
-
-        .unreachable_literal => return Type.fromIP(analyser, .noreturn_type, null),
-        .anyframe_literal => return Type.fromIP(analyser, .anyframe_type, null),
-
-        .anyframe_type => return .unknown_type,
-
-        .mul,
-        .div,
-        .mod,
-        .mul_wrap,
-        .mul_sat,
-        .add_wrap,
-        .sub_wrap,
-        .add_sat,
-        .sub_sat,
-        .bit_and,
-        .bit_xor,
-        .bit_or,
-        => {
-            const lhs, const rhs = tree.nodeData(node).node_and_node;
-            var lhs_ty = try analyser.resolveTypeOfNodeInternal(.of(lhs, handle)) orelse return null;
-            if (lhs_ty.is_type_val) return null;
-            var rhs_ty = try analyser.resolveTypeOfNodeInternal(.of(rhs, handle)) orelse return null;
-            if (rhs_ty.is_type_val) return null;
-            lhs_ty = lhs_ty.withoutIPIndex(analyser);
-            rhs_ty = rhs_ty.withoutIPIndex(analyser);
-            return analyser.resolvePeerTypes(lhs_ty, rhs_ty);
-        },
-
-        .add => {
-            const lhs, const rhs = tree.nodeData(node).node_and_node;
-            var lhs_ty = try analyser.resolveTypeOfNodeInternal(.of(lhs, handle)) orelse return null;
-            if (lhs_ty.is_type_val) return null;
-            var rhs_ty = try analyser.resolveTypeOfNodeInternal(.of(rhs, handle)) orelse return null;
-            if (rhs_ty.is_type_val) return null;
-            lhs_ty = lhs_ty.withoutIPIndex(analyser);
-            rhs_ty = rhs_ty.withoutIPIndex(analyser);
-            if (lhs_ty.pointerSize(analyser)) |lhs_size| {
-                return switch (lhs_size) {
-                    .many, .c => lhs_ty,
-                    else => null,
-                };
-            }
-            return try analyser.resolvePeerTypes(lhs_ty, rhs_ty);
-        },
-
-        .sub => {
-            const lhs, const rhs = tree.nodeData(node).node_and_node;
-            var lhs_ty = try analyser.resolveTypeOfNodeInternal(.of(lhs, handle)) orelse return null;
-            if (lhs_ty.is_type_val) return null;
-            var rhs_ty = try analyser.resolveTypeOfNodeInternal(.of(rhs, handle)) orelse return null;
-            if (rhs_ty.is_type_val) return null;
-            lhs_ty = lhs_ty.withoutIPIndex(analyser);
-            rhs_ty = rhs_ty.withoutIPIndex(analyser);
-            if (lhs_ty.pointerSize(analyser)) |lhs_size| {
-                if (rhs_ty.pointerSize(analyser)) |rhs_size| {
-                    if (lhs_size == .slice) return null;
-                    if (rhs_size == .slice) return null;
-                    return Type.fromIP(analyser, .usize_type, null);
-                } else {
-                    return switch (lhs_size) {
-                        .many, .c => lhs_ty,
-                        else => null,
-                    };
-                }
-            }
-            return try analyser.resolvePeerTypes(lhs_ty, rhs_ty);
-        },
-
-        .shl,
-        .shl_sat,
-        .shr,
-        => {
-            const lhs, _ = tree.nodeData(node).node_and_node;
-            const lhs_ty = try analyser.resolveTypeOfNodeInternal(.of(lhs, handle)) orelse return null;
-            if (lhs_ty.is_type_val) return null;
-            return lhs_ty.withoutIPIndex(analyser);
-        },
-
-        .array_mult => {
-            const elem_idx, const mult_idx = tree.nodeData(node).node_and_node;
-
-            var elem_ty = try analyser.resolveTypeOfNodeInternal(.of(elem_idx, handle)) orelse return null;
-            if (elem_ty.is_type_val) return null;
-
-            const mult_lit = try analyser.resolveIntegerLiteral(u64, .of(mult_idx, handle));
-
-            blk: {
-                elem_ty = elem_ty.pointerElementType(analyser, .one) orelse break :blk;
-                elem_ty = try elem_ty.instanceUnchecked(analyser);
-                elem_ty = try analyser.resolveArrayMult(elem_ty, mult_lit) orelse return null;
-                elem_ty = try elem_ty.typeOf(analyser);
-                const pointer_ty = try Type.createPointerType(analyser, .one, .none, true, elem_ty);
-                return try pointer_ty.instanceUnchecked(analyser);
-            }
-
-            return try analyser.resolveArrayMult(elem_ty, mult_lit);
-        },
-        .array_cat => {
-            const l_elem_idx, const r_elem_idx = tree.nodeData(node).node_and_node;
-
-            var l_elem_ty = try analyser.resolveTypeOfNodeInternal(.of(l_elem_idx, handle)) orelse return null;
-            if (l_elem_ty.is_type_val) return null;
-
-            var r_elem_ty = try analyser.resolveTypeOfNodeInternal(.of(r_elem_idx, handle)) orelse return null;
-            if (r_elem_ty.is_type_val) return null;
-
-            blk: {
-                l_elem_ty = l_elem_ty.pointerElementType(analyser, .one) orelse break :blk;
-                r_elem_ty = r_elem_ty.pointerElementType(analyser, .one) orelse break :blk;
-                l_elem_ty = try l_elem_ty.instanceUnchecked(analyser);
-                r_elem_ty = try r_elem_ty.instanceUnchecked(analyser);
-                var elem_ty = try analyser.resolveArrayCat(l_elem_ty, r_elem_ty) orelse return null;
-                elem_ty = try elem_ty.typeOf(analyser);
-                const pointer_ty = try Type.createPointerType(analyser, .one, .none, true, elem_ty);
-                return try pointer_ty.instanceUnchecked(analyser);
-            }
-
-            return try analyser.resolveArrayCat(l_elem_ty, r_elem_ty);
-        },
-
-        .assign_mul,
-        .assign_div,
-        .assign_mod,
-        .assign_add,
-        .assign_sub,
-        .assign_shl,
-        .assign_shl_sat,
-        .assign_shr,
-        .assign_bit_and,
-        .assign_bit_xor,
-        .assign_bit_or,
-        .assign_mul_wrap,
-        .assign_add_wrap,
-        .assign_sub_wrap,
-        .assign_mul_sat,
-        .assign_add_sat,
-        .assign_sub_sat,
-        .assign,
-        .assign_destructure,
-        => {},
-
-        .struct_init_dot_two,
-        .struct_init_dot_two_comma,
-        .struct_init_dot,
-        .struct_init_dot_comma,
-        => {},
-
-        .root,
-        .test_decl,
-        .@"errdefer",
-        .@"defer",
-        .switch_case_one,
-        .switch_case_inline_one,
-        .switch_case,
-        .switch_case_inline,
-        .switch_range,
-        => {},
-        .@"continue",
-        .@"break",
-        .@"return",
-        => {
-            return Type.fromIP(analyser, .noreturn_type, null);
-        },
-
-        .@"suspend",
-        .@"resume",
-        => {},
-
-        .asm_simple,
-        .@"asm",
-        .asm_output,
-        .asm_input,
-        => {},
-
-        .identifier,
-        .address_of,
-        .field_access,
-        .slice,
-        .slice_sentinel,
-        .slice_open,
-        .array_access,
-        .deref,
-        => {
-            const binding = try analyser.resolveBindingOfNodeUncached(options) orelse return null;
-            return binding.type;
-        },
-    }
+                                    .identifier,
+                                    .address_of,
+                                    .field_access,
+                                    .slice,
+                                    .slice_sentinel,
+                                    .slice_open,
+                                    .array_access,
+                                    .deref,
+                                    => {
+                                        const binding = try analyser.resolveBindingOfNodeUncached(options) orelse return null;
+                                        return binding.type;
+                                    },
+                                }
     return null;
 }
 
@@ -3317,18 +3317,18 @@ pub const Type = struct {
                             .size = size,
                             .is_const = is_const,
                         },
-                    },
-                });
+                        },
+                    });
                 return .{ .ip_index = .{ .type = .type_type, .index = index } };
             }
-            return .{
-                .pointer = .{
-                    .size = size,
-                    .sentinel = sentinel,
-                    .is_const = is_const,
-                    .elem_ty = try analyser.allocType(elem_ty),
-                },
-            };
+                 return .{
+                     .pointer = .{
+                         .size = size,
+                         .sentinel = sentinel,
+                         .is_const = is_const,
+                         .elem_ty = try analyser.allocType(elem_ty),
+                     },
+                 };
         }
 
         fn createArray(
@@ -3347,16 +3347,16 @@ pub const Type = struct {
                         .child = child,
                         .sentinel = try analyser.coerceIP(child, sentinel) orelse break :blk,
                     },
-                });
+                    });
                 return .{ .ip_index = .{ .type = .type_type, .index = index } };
             }
-            return .{
-                .array = .{
-                    .elem_count = elem_count,
-                    .sentinel = sentinel,
-                    .elem_ty = try analyser.allocType(elem_ty),
-                },
-            };
+                 return .{
+                     .array = .{
+                         .elem_count = elem_count,
+                         .sentinel = sentinel,
+                         .elem_ty = try analyser.allocType(elem_ty),
+                     },
+                 };
         }
 
         fn createTuple(analyser: *Analyser, elem_tys: []Type) !Data {
@@ -3407,15 +3407,15 @@ pub const Type = struct {
                         .error_set_type = error_set_type,
                         .payload_type = payload_type,
                     },
-                });
+                    });
                 return .{ .ip_index = .{ .type = .type_type, .index = index } };
             }
-            return .{
-                .error_union = .{
-                    .error_set = if (error_set) |e| try analyser.allocType(e) else null,
-                    .payload = try analyser.allocType(payload),
-                },
-            };
+                 return .{
+                     .error_union = .{
+                         .error_set = if (error_set) |e| try analyser.allocType(e) else null,
+                         .payload = try analyser.allocType(payload),
+                     },
+                 };
         }
 
         pub fn hashWithHasher(data: Data, hasher: anytype) void {
@@ -3726,45 +3726,45 @@ pub const Type = struct {
                             }
                             break :blk new_params;
                         },
+                        },
                     },
-                },
-                .function => |info| return .{
-                    .function = .{
-                        .fn_token = info.fn_token,
-                        .handle = info.handle,
-                        .container_type = try analyser.allocType(try analyser.resolveGenericTypeInternal(info.container_type.*, bound_params, visiting)),
-                        .doc_comments = info.doc_comments,
-                        .name = info.name,
-                        .parameters = blk: {
-                            const parameters = try analyser.arena.alloc(Parameter, info.parameters.len);
-                            for (info.parameters, parameters) |old, *new| {
+                    .function => |info| return .{
+                        .function = .{
+                            .fn_token = info.fn_token,
+                            .handle = info.handle,
+                            .container_type = try analyser.allocType(try analyser.resolveGenericTypeInternal(info.container_type.*, bound_params, visiting)),
+                            .doc_comments = info.doc_comments,
+                            .name = info.name,
+                            .parameters = blk: {
+                                const parameters = try analyser.arena.alloc(Parameter, info.parameters.len);
+                                for (info.parameters, parameters) |old, *new| {
+                                    new.* = .{
+                                        .doc_comments = old.doc_comments,
+                                        .modifier = old.modifier,
+                                        .name = old.name,
+                                        .name_token = old.name_token,
+                                        .type = try analyser.resolveGenericTypeInternal(old.type, bound_params, visiting),
+                                    };
+                                }
+                                break :blk parameters;
+                            },
+                            .has_varargs = info.has_varargs,
+                            .return_value = try analyser.allocType(try analyser.resolveGenericTypeInternal(info.return_value.*, bound_params, visiting)),
+                        },
+                        },
+                    .either => |info| return .{
+                        .either = blk: {
+                            const entries = try analyser.arena.alloc(EitherEntry, info.len);
+                            for (info, entries) |old, *new| {
                                 new.* = .{
-                                    .doc_comments = old.doc_comments,
-                                    .modifier = old.modifier,
-                                    .name = old.name,
-                                    .name_token = old.name_token,
-                                    .type = try analyser.resolveGenericTypeInternal(old.type, bound_params, visiting),
+                                    .type_data = try old.type_data.resolveGeneric(analyser, bound_params, visiting),
+                                    .descriptor = old.descriptor,
                                 };
                             }
-                            break :blk parameters;
+                            break :blk entries;
                         },
-                        .has_varargs = info.has_varargs,
-                        .return_value = try analyser.allocType(try analyser.resolveGenericTypeInternal(info.return_value.*, bound_params, visiting)),
-                    },
-                },
-                .either => |info| return .{
-                    .either = blk: {
-                        const entries = try analyser.arena.alloc(EitherEntry, info.len);
-                        for (info, entries) |old, *new| {
-                            new.* = .{
-                                .type_data = try old.type_data.resolveGeneric(analyser, bound_params, visiting),
-                                .descriptor = old.descriptor,
-                            };
-                        }
-                        break :blk entries;
-                    },
-                },
-            }
+                        },
+                    }
         }
     };
 
@@ -3774,7 +3774,7 @@ pub const Type = struct {
                 .type = .type_type,
                 .index = null,
             },
-        },
+            },
         .is_type_val = true,
     };
 
@@ -3913,57 +3913,57 @@ pub const Type = struct {
             return chosen;
         }
 
-        // Note that we don't hash/equate descriptors to remove
-        // duplicates
+                              // Note that we don't hash/equate descriptors to remove
+                              // duplicates
 
-        const DeduplicatorContext = struct {
-            pub fn hash(self: @This(), item: Type.Data.EitherEntry) u32 {
-                _ = self;
-                const ty: Type = .{ .data = item.type_data, .is_type_val = true };
-                return ty.hash32();
-            }
+                              const DeduplicatorContext = struct {
+                                  pub fn hash(self: @This(), item: Type.Data.EitherEntry) u32 {
+                                      _ = self;
+                                      const ty: Type = .{ .data = item.type_data, .is_type_val = true };
+                                      return ty.hash32();
+                                  }
 
-            pub fn eql(self: @This(), a: Type.Data.EitherEntry, b: Type.Data.EitherEntry, b_index: usize) bool {
-                _ = b_index;
-                _ = self;
-                const a_ty: Type = .{ .data = a.type_data, .is_type_val = true };
-                const b_ty: Type = .{ .data = b.type_data, .is_type_val = true };
-                return a_ty.eql(b_ty);
-            }
-        };
-        const Deduplicator = std.array_hash_map.Custom(Type.Data.EitherEntry, void, DeduplicatorContext, true);
+                                  pub fn eql(self: @This(), a: Type.Data.EitherEntry, b: Type.Data.EitherEntry, b_index: usize) bool {
+                                      _ = b_index;
+                                      _ = self;
+                                      const a_ty: Type = .{ .data = a.type_data, .is_type_val = true };
+                                      const b_ty: Type = .{ .data = b.type_data, .is_type_val = true };
+                                      return a_ty.eql(b_ty);
+                                  }
+                              };
+                              const Deduplicator = std.array_hash_map.Custom(Type.Data.EitherEntry, void, DeduplicatorContext, true);
 
-        var deduplicator: Deduplicator = .empty;
-        defer deduplicator.deinit(arena);
+                              var deduplicator: Deduplicator = .empty;
+                              defer deduplicator.deinit(arena);
 
-        const has_type_val = for (entries) |entry| {
-            if (entry.type.data == .compile_error) {
-                continue;
-            }
-            break entry.type.is_type_val;
-        } else entries[0].type.is_type_val;
+                              const has_type_val = for (entries) |entry| {
+                                  if (entry.type.data == .compile_error) {
+                                      continue;
+                                  }
+                                  break entry.type.is_type_val;
+                              } else entries[0].type.is_type_val;
 
-        for (entries) |entry| {
-            try deduplicator.put(
-                arena,
-                .{ .type_data = entry.type.data, .descriptor = entry.descriptor },
-                {},
-            );
-            if (entry.type.data == .compile_error) {
-                continue;
-            }
-            if (entry.type.is_type_val != has_type_val) {
-                return null;
-            }
-        }
+                              for (entries) |entry| {
+                                  try deduplicator.put(
+                                      arena,
+                                      .{ .type_data = entry.type.data, .descriptor = entry.descriptor },
+                                      {},
+                                  );
+                                  if (entry.type.data == .compile_error) {
+                                      continue;
+                                  }
+                                  if (entry.type.is_type_val != has_type_val) {
+                                      return null;
+                                  }
+                              }
 
-        if (deduplicator.count() == 1)
-            return entries[0].type;
+                              if (deduplicator.count() == 1)
+                                  return entries[0].type;
 
-        return .{
-            .data = .{ .either = try arena.dupe(Type.Data.EitherEntry, deduplicator.keys()) },
-            .is_type_val = has_type_val,
-        };
+                              return .{
+                                  .data = .{ .either = try arena.dupe(Type.Data.EitherEntry, deduplicator.keys()) },
+                                  .is_type_val = has_type_val,
+                              };
     }
 
     /// Resolves all possible types by recursively expanding any conditional types.
@@ -5013,9 +5013,9 @@ pub fn getFieldAccessType(
             .identifier => {
                 const symbol_name = offsets.identifierIndexToSlice(tokenizer.buffer, tok.loc.start, .name);
                 if (try analyser.lookupSymbolGlobal(
-                    handle,
-                    symbol_name,
-                    source_index,
+                        handle,
+                        symbol_name,
+                        source_index,
                 )) |child| {
                     current_type = (try child.resolveType(analyser)) orelse return null;
                 } else return null;
@@ -5085,7 +5085,7 @@ pub fn getFieldAccessType(
                             .start = loc.start + tok.loc.end,
                             .end = loc.start + next.loc.start,
                         },
-                    ) orelse return null;
+                        ) orelse return null;
                     continue;
                 }
 
@@ -5513,111 +5513,111 @@ pub fn getPositionContext(
             },
             .identifier => if (curr_ctx.isErrSetDef())
                 continue // Intent is to skip everything between the `error{...}` braces
-            else switch (curr_ctx.ctx) {
-                .enum_literal => |loc| .{ .enum_literal = tokenLocAppend(loc, tok) },
-                .field_access => |loc| .{ .field_access = tokenLocAppend(loc, tok) },
-                .label_access => |loc| if (loc.start == loc.end)
-                    .{ .label_access = tok.loc }
-                else
-                    .{ .var_access = tok.loc },
-                .test_doctest_name => .{ .test_doctest_name = tok.loc },
-                else => .{ .var_access = tok.loc },
-            },
-            .builtin => .{ .builtin = tok.loc },
-            .period => switch (curr_ctx.ctx) {
-                .empty, .label_access => .{ .enum_literal = tok.loc },
-                .enum_literal => .empty,
-                .keyword => |token_index| switch (tree.tokenTag(token_index)) {
-                    .keyword_break => .{ .enum_literal = tok.loc },
-                    else => .other,
-                },
-                .comment, .other, .error_access => curr_ctx.ctx,
-                .test_doctest_name, .var_access, .field_access => |loc| .{ .field_access = tokenLocAppend(loc, tok) },
-                else => .{ .field_access = tokenLocAppend(curr_ctx.ctx.loc(tree) orelse tok.loc, tok) },
-            },
-            .period_asterisk => .{ .field_access = tokenLocAppend(curr_ctx.ctx.loc(tree) orelse tok.loc, tok) },
-            .question_mark => switch (curr_ctx.ctx) {
-                .field_access => |loc| .{ .field_access = tokenLocAppend(loc, tok) },
-                else => .empty,
-            },
-            .colon => switch (curr_ctx.ctx) {
-                .keyword => |token_index| switch (tree.tokenTag(token_index)) {
+                else switch (curr_ctx.ctx) {
+                    .enum_literal => |loc| .{ .enum_literal = tokenLocAppend(loc, tok) },
+                    .field_access => |loc| .{ .field_access = tokenLocAppend(loc, tok) },
+                    .label_access => |loc| if (loc.start == loc.end)
+                        .{ .label_access = tok.loc }
+                    else
+                        .{ .var_access = tok.loc },
+                        .test_doctest_name => .{ .test_doctest_name = tok.loc },
+                        else => .{ .var_access = tok.loc },
+                    },
+                    .builtin => .{ .builtin = tok.loc },
+                    .period => switch (curr_ctx.ctx) {
+                        .empty, .label_access => .{ .enum_literal = tok.loc },
+                        .enum_literal => .empty,
+                        .keyword => |token_index| switch (tree.tokenTag(token_index)) {
+                            .keyword_break => .{ .enum_literal = tok.loc },
+                            else => .other,
+                        },
+                        .comment, .other, .error_access => curr_ctx.ctx,
+                        .test_doctest_name, .var_access, .field_access => |loc| .{ .field_access = tokenLocAppend(loc, tok) },
+                        else => .{ .field_access = tokenLocAppend(curr_ctx.ctx.loc(tree) orelse tok.loc, tok) },
+                    },
+                    .period_asterisk => .{ .field_access = tokenLocAppend(curr_ctx.ctx.loc(tree) orelse tok.loc, tok) },
+                    .question_mark => switch (curr_ctx.ctx) {
+                        .field_access => |loc| .{ .field_access = tokenLocAppend(loc, tok) },
+                        else => .empty,
+                    },
+                    .colon => switch (curr_ctx.ctx) {
+                        .keyword => |token_index| switch (tree.tokenTag(token_index)) {
+                            .keyword_break,
+                            .keyword_continue,
+                            => .{ .label_access = .{ .start = tok.loc.end, .end = tok.loc.end } },
+                            else => .empty,
+                        },
+                        else => .empty,
+                    },
+                    .l_paren => {
+                        if (curr_ctx.ctx == .empty) curr_ctx.ctx = .{ .parens_expr = tok.loc };
+                        const scope: Stack.State.Scope = if (curr_ctx.ctx == .keyword) switch (tree.tokenTag(curr_ctx.ctx.keyword)) {
+                            .keyword_for,
+                            .keyword_if,
+                            .keyword_while,
+                            => .global,
+                            else => .parens,
+                            } else .parens;
+                        try stack.push(allocator, &.{ .ctx = .empty, .scope = scope });
+                        continue;
+                    },
+                    .r_paren => {
+                        stack.pop(curr_ctx.scope == .parens);
+                        continue;
+                    },
+                    .l_bracket => {
+                        try stack.push(allocator, &.{ .ctx = .empty, .scope = .brackets });
+                        continue;
+                    },
+                    .r_bracket => {
+                        stack.pop(curr_ctx.scope == .brackets);
+                        continue;
+                    },
+                    .l_brace => {
+                        try stack.push(allocator, &.{ .ctx = if (curr_ctx.ctx == .error_access) curr_ctx.ctx else .empty, .scope = .braces });
+                        continue;
+                    },
+                    .r_brace => {
+                        stack.pop(curr_ctx.scope == .braces);
+                        continue;
+                    },
+                    .keyword_error => .{ .error_access = tok.loc },
+                    .number_literal => {
+                        if (tok.loc.start <= source_index and tok.loc.end >= source_index) {
+                            return .{ .number_literal = tok.loc };
+                        }
+                        continue;
+                    },
+                    .char_literal => {
+                        if (tok.loc.start <= source_index and tok.loc.end >= source_index) {
+                            return .{ .char_literal = tok.loc };
+                        }
+                        continue;
+                    },
+                    .keyword_addrspace,
                     .keyword_break,
+                    .keyword_callconv,
                     .keyword_continue,
-                    => .{ .label_access = .{ .start = tok.loc.end, .end = tok.loc.end } },
-                    else => .empty,
-                },
-                else => .empty,
-            },
-            .l_paren => {
-                if (curr_ctx.ctx == .empty) curr_ctx.ctx = .{ .parens_expr = tok.loc };
-                const scope: Stack.State.Scope = if (curr_ctx.ctx == .keyword) switch (tree.tokenTag(curr_ctx.ctx.keyword)) {
                     .keyword_for,
                     .keyword_if,
+                    .keyword_switch,
                     .keyword_while,
-                    => .global,
-                    else => .parens,
-                } else .parens;
-                try stack.push(allocator, &.{ .ctx = .empty, .scope = scope });
-                continue;
-            },
-            .r_paren => {
-                stack.pop(curr_ctx.scope == .parens);
-                continue;
-            },
-            .l_bracket => {
-                try stack.push(allocator, &.{ .ctx = .empty, .scope = .brackets });
-                continue;
-            },
-            .r_bracket => {
-                stack.pop(curr_ctx.scope == .brackets);
-                continue;
-            },
-            .l_brace => {
-                try stack.push(allocator, &.{ .ctx = if (curr_ctx.ctx == .error_access) curr_ctx.ctx else .empty, .scope = .braces });
-                continue;
-            },
-            .r_brace => {
-                stack.pop(curr_ctx.scope == .braces);
-                continue;
-            },
-            .keyword_error => .{ .error_access = tok.loc },
-            .number_literal => {
-                if (tok.loc.start <= source_index and tok.loc.end >= source_index) {
-                    return .{ .number_literal = tok.loc };
-                }
-                continue;
-            },
-            .char_literal => {
-                if (tok.loc.start <= source_index and tok.loc.end >= source_index) {
-                    return .{ .char_literal = tok.loc };
-                }
-                continue;
-            },
-            .keyword_addrspace,
-            .keyword_break,
-            .keyword_callconv,
-            .keyword_continue,
-            .keyword_for,
-            .keyword_if,
-            .keyword_switch,
-            .keyword_while,
-            => |tag| new_state: {
-                std.debug.assert(tree.tokenTag(current_token) == tag);
-                break :new_state .{ .keyword = current_token };
-            },
-            .keyword_test => .{ .test_doctest_name = .{ .start = tok.loc.end, .end = tok.loc.end } },
-            .container_doc_comment => .comment,
-            .doc_comment => new_state: {
-                if (!curr_ctx.isErrSetDef()) break :new_state .comment; // Intent is to skip everything between the `error{...}` braces
-                continue;
-            },
-            .comma => new_state: {
-                if (!curr_ctx.isErrSetDef()) break :new_state .empty; // Intent is to skip everything between the `error{...}` braces
-                continue;
-            },
-            else => .empty,
-        };
+                    => |tag| new_state: {
+                        std.debug.assert(tree.tokenTag(current_token) == tag);
+                        break :new_state .{ .keyword = current_token };
+                    },
+                    .keyword_test => .{ .test_doctest_name = .{ .start = tok.loc.end, .end = tok.loc.end } },
+                    .container_doc_comment => .comment,
+                    .doc_comment => new_state: {
+                        if (!curr_ctx.isErrSetDef()) break :new_state .comment; // Intent is to skip everything between the `error{...}` braces
+                        continue;
+                    },
+                    .comma => new_state: {
+                        if (!curr_ctx.isErrSetDef()) break :new_state .empty; // Intent is to skip everything between the `error{...}` braces
+                        continue;
+                    },
+                    else => .empty,
+                };
         curr_ctx.ctx = new_state;
     }
 
@@ -5924,7 +5924,7 @@ pub const DeclWithHandle = struct {
                                 .token_handle = .{ .token = anytype_token, .handle = self.handle },
                                 .type_from_callsite_references = if (ty) |t| try analyser.allocType(t) else null,
                             },
-                        },
+                            },
                         .is_type_val = false,
                     };
                 };
@@ -5951,8 +5951,8 @@ pub const DeclWithHandle = struct {
             ),
             .error_union_error => |pay| try analyser.resolveUnwrapErrorUnionType(
                 (try analyser.resolveTypeOfNodeInternal(.of(
-                    pay.condition.unwrap() orelse return null,
-                    self.handle,
+                                                            pay.condition.unwrap() orelse return null,
+                                                            self.handle,
                 ))) orelse return null,
                 .error_set,
             ),
@@ -5961,69 +5961,69 @@ pub const DeclWithHandle = struct {
                     break :blk Type.fromIP(analyser, .usize_type, null);
                 }
                 break :blk try analyser.resolveBracketAccessType(
-                    (try analyser.resolveTypeOfNodeInternal(.of(pay.condition, self.handle))) orelse return null,
-                    .{ .single = null },
-                );
-            },
-            .assign_destructure => |pay| blk: {
-                const var_decl = pay.getFullVarDecl(tree);
-                if (var_decl.ast.type_node.unwrap()) |type_node| {
-                    if (try analyser.resolveTypeOfNode(.of(type_node, self.handle))) |ty|
-                        break :blk try ty.instanceTypeVal(analyser);
-                }
+                           (try analyser.resolveTypeOfNodeInternal(.of(pay.condition, self.handle))) orelse return null,
+                           .{ .single = null },
+                       );
+                   },
+                   .assign_destructure => |pay| blk: {
+                       const var_decl = pay.getFullVarDecl(tree);
+                       if (var_decl.ast.type_node.unwrap()) |type_node| {
+                           if (try analyser.resolveTypeOfNode(.of(type_node, self.handle))) |ty|
+                               break :blk try ty.instanceTypeVal(analyser);
+                       }
 
-                const init_node = tree.nodeData(pay.node).extra_and_node[1];
-                const node = try analyser.resolveTypeOfNode(.of(init_node, self.handle)) orelse return null;
-                if (node.is_type_val) return null;
-                break :blk switch (node.data) {
-                    .array => |array_info| try array_info.elem_ty.instanceTypeVal(analyser),
-                    .tuple => try analyser.resolveBracketAccessType(node, .{ .single = pay.index }),
-                    .ip_index => |payload| switch (analyser.ip.indexToKey(payload.type)) {
-                        .vector_type => |vector_info| Type.fromIP(analyser, vector_info.child, null),
-                        .array_type => |array_info| Type.fromIP(analyser, array_info.child, null),
-                        .tuple_type => try analyser.resolveBracketAccessType(node, .{ .single = pay.index }),
-                        else => null,
-                    },
-                    else => null,
-                };
-            },
-            .label => |decl| try analyser.resolveTypeOfNodeInternal(.of(decl.block, self.handle)),
-            .switch_payload,
-            .switch_inline_tag_payload,
-            => |payload| blk: {
-                const cond = tree.nodeData(payload.node).node_and_extra[0];
-                const case = payload.getCase(tree);
+                       const init_node = tree.nodeData(pay.node).extra_and_node[1];
+                       const node = try analyser.resolveTypeOfNode(.of(init_node, self.handle)) orelse return null;
+                       if (node.is_type_val) return null;
+                       break :blk switch (node.data) {
+                           .array => |array_info| try array_info.elem_ty.instanceTypeVal(analyser),
+                           .tuple => try analyser.resolveBracketAccessType(node, .{ .single = pay.index }),
+                           .ip_index => |payload| switch (analyser.ip.indexToKey(payload.type)) {
+                               .vector_type => |vector_info| Type.fromIP(analyser, vector_info.child, null),
+                               .array_type => |array_info| Type.fromIP(analyser, array_info.child, null),
+                               .tuple_type => try analyser.resolveBracketAccessType(node, .{ .single = pay.index }),
+                               else => null,
+                           },
+                           else => null,
+                       };
+                   },
+                   .label => |decl| try analyser.resolveTypeOfNodeInternal(.of(decl.block, self.handle)),
+                   .switch_payload,
+                   .switch_inline_tag_payload,
+                   => |payload| blk: {
+                       const cond = tree.nodeData(payload.node).node_and_extra[0];
+                       const case = payload.getCase(tree);
 
-                const switch_expr_type: Type = (try analyser.resolveTypeOfNodeInternal(.of(cond, self.handle))) orelse return null;
+                       const switch_expr_type: Type = (try analyser.resolveTypeOfNodeInternal(.of(cond, self.handle))) orelse return null;
 
-                if (self.decl == .switch_inline_tag_payload) {
-                    return try analyser.resolveUnionTag(try switch_expr_type.typeOf(analyser));
-                }
+                       if (self.decl == .switch_inline_tag_payload) {
+                           return try analyser.resolveUnionTag(try switch_expr_type.typeOf(analyser));
+                       }
 
-                if (switch_expr_type.isEnumType()) break :blk switch_expr_type;
-                if (!switch_expr_type.isUnionType()) return switch_expr_type;
+                       if (switch_expr_type.isEnumType()) break :blk switch_expr_type;
+                       if (!switch_expr_type.isUnionType()) return switch_expr_type;
 
-                if (case.ast.values.len == 0) {
-                    if (case.inline_token == null) {
-                        return switch_expr_type;
-                    }
-                    // TODO either type
-                    return null;
-                }
+                       if (case.ast.values.len == 0) {
+                           if (case.inline_token == null) {
+                               return switch_expr_type;
+                           }
+                           // TODO either type
+                           return null;
+                       }
 
-                // TODO Peer type resolution, we just use the first resolvable item for now.
-                for (case.ast.values) |case_value| {
-                    if (tree.nodeTag(case_value) != .enum_literal) continue;
-                    const name_token = tree.nodeMainToken(case_value);
-                    const name = offsets.identifierTokenToNameSlice(tree, name_token);
-                    const decl = try switch_expr_type.lookupSymbol(analyser, name) orelse continue;
-                    break :blk (try decl.resolveType(analyser)) orelse continue;
-                }
+                       // TODO Peer type resolution, we just use the first resolvable item for now.
+                       for (case.ast.values) |case_value| {
+                           if (tree.nodeTag(case_value) != .enum_literal) continue;
+                           const name_token = tree.nodeMainToken(case_value);
+                           const name = offsets.identifierTokenToNameSlice(tree, name_token);
+                           const decl = try switch_expr_type.lookupSymbol(analyser, name) orelse continue;
+                           break :blk (try decl.resolveType(analyser)) orelse continue;
+                       }
 
-                return null;
-            },
-            .error_token => return null,
-        } orelse return null;
+                       return null;
+                   },
+                   .error_token => return null,
+                   } orelse return null;
 
         if (self.container_type) |container_ty| {
             switch (container_ty.data) {
@@ -6181,10 +6181,10 @@ pub const EnclosingScopeIterator = struct {
         };
 
         self.current_scope = if (std.sort.binarySearch(
-            Scope.Index,
-            scopes,
-            Context{ .scope_locs = scope_locs, .source_index = self.source_index },
-            Context.compare,
+                Scope.Index,
+                scopes,
+                Context{ .scope_locs = scope_locs, .source_index = self.source_index },
+                Context.compare,
         )) |scope_index| scopes[scope_index].toOptional() else .none;
 
         return result;
@@ -6282,7 +6282,7 @@ pub fn innermostContainer(analyser: *Analyser, handle: *DocumentStore.Handle, so
                 },
                 .bound_params = meta_params,
             },
-        },
+            },
         .is_type_val = true,
     };
 }
@@ -6385,9 +6385,9 @@ pub fn lookupSymbolFieldInit(
     ancestors: []const Ast.Node.Index,
 ) Error!?DeclWithHandle {
     var container_type = (try analyser.resolveExpressionType(
-        handle,
-        node,
-        ancestors,
+            handle,
+            node,
+            ancestors,
     )) orelse return null;
 
     if (container_type.is_type_val) return null;
@@ -6436,9 +6436,9 @@ pub fn resolveExpressionType(
     ancestors: []const Ast.Node.Index,
 ) Error!?Type {
     return (try analyser.resolveExpressionTypeFromAncestors(
-        handle,
-        node,
-        ancestors,
+            handle,
+            node,
+            ancestors,
     )) orelse (try analyser.resolveTypeOfNode(.of(node, handle)));
 }
 
@@ -6488,9 +6488,9 @@ pub fn resolveExpressionTypeFromAncestors(
                 return null;
 
             if (try analyser.resolveExpressionType(
-                handle,
-                ancestors[0],
-                ancestors[1..],
+                    handle,
+                    ancestors[0],
+                    ancestors[1..],
             )) |array_type| {
                 return (try analyser.resolveBracketAccessType(array_type, .{ .single = element_index }));
             }
@@ -6525,8 +6525,8 @@ pub fn resolveExpressionTypeFromAncestors(
                             .size = .slice,
                             .is_const = true,
                         },
-                    },
-                });
+                        },
+                    });
                 return Type.fromIP(analyser, ty, null);
             }
         },
@@ -6796,7 +6796,7 @@ pub fn resolveExpressionTypeFromAncestors(
                                     .sentinel = info.sentinel,
                                     .elem_ty = info.elem_ty,
                                 },
-                            },
+                                },
                             .is_type_val = false,
                         };
                     },
@@ -6813,7 +6813,7 @@ pub fn resolveExpressionTypeFromAncestors(
                                     .child = pointer_info.elem_type,
                                     .sentinel = pointer_info.sentinel,
                                 },
-                            });
+                                });
                             return Type.fromIP(analyser, ty, null);
                         },
                         else => {},
@@ -6847,8 +6847,8 @@ pub fn resolveExpressionTypeFromAncestors(
                             .size = .slice,
                             .is_const = true,
                         },
-                    },
-                });
+                        },
+                    });
                 return Type.fromIP(analyser, ty, null);
             }
         },

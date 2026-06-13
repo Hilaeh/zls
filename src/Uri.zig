@@ -11,9 +11,9 @@ const Uri = @This();
 ///   - remove query and fragment component
 raw: []const u8,
 
-pub fn parse(allocator: std.mem.Allocator, text: []const u8) (std.Uri.ParseError || error{OutOfMemory})!Uri {
-    return try parseWithOs(allocator, text, builtin.os.tag == .windows);
-}
+    pub fn parse(allocator: std.mem.Allocator, text: []const u8) (std.Uri.ParseError || error{OutOfMemory})!Uri {
+        return try parseWithOs(allocator, text, builtin.os.tag == .windows);
+    }
 
 fn parseWithOs(
     allocator: std.mem.Allocator,

@@ -327,6 +327,9 @@ fn symbolReferences(
              );
              for (uris.keys()) |uri| {
                  if (uri.eql(current_handle.uri)) continue;
+                 if (DocumentStore.isInStd(uri)) continue;
+                 if (DocumentStore.isBuiltinFile(uri)) continue;
+                 // is external too...
                  const dependency_handle = analyser.store.getHandle(uri) orelse continue;
                  try builder.collectReferences(dependency_handle, .root);
              }
@@ -341,15 +344,15 @@ fn gatherWorkspaceReferenceCandidates(
     /// The file which contains the symbol that is being searched for.
     target_handle: *DocumentStore.Handle,
 ) Analyser.Error!Uri.ArrayHashMap(void) {
-    // std.debug.print("gather start", .{});
+    std.debug.print("gather start", .{});
     var found_uris: Uri.ArrayHashMap(void) = .empty;
     try found_uris.put(arena, target_handle.uri, {});
 
-    var iter = store.handles_imported_by.module_dictionary.iterator();
-    std.debug.print("printing module dictionary | ", .{});
-    while (iter.next()) |entry| {
-        std.debug.print("module name: {s}, uri: {s} | ", .{ entry.key_ptr.*, entry.value_ptr.raw });
-    }
+    // var iter = store.handles_imported_by.module_dictionary.iterator();
+    // std.debug.print("printing module dictionary | ", .{});
+    // while (iter.next()) |entry| {
+    // std.debug.print("module name: {s}, uri: {s} | ", .{ entry.key_ptr.*, entry.value_ptr.raw });
+    // }
 
     var i: usize = 0;
     while (i < found_uris.count()) : (i += 1) {

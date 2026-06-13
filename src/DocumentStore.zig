@@ -61,6 +61,10 @@ const ImportedBy = struct {
     const PendingModuleImport = struct {
         importer_uri: Uri,
         module_name: []const u8,
+        fn deinit(self: *PendingModuleImport, allocator: std.mem.Allocator) void {
+            self.importer_uri.deinit(allocator);
+            allocator.free(self.module_name);
+        }
     };
     map: Uri.ArrayHashMap(Entry),
     module_dictionary: std.StringHashMapUnmanaged(Uri),
@@ -77,7 +81,6 @@ const ImportedBy = struct {
     };
 
     fn deinit(self: *ImportedBy, allocator: std.mem.Allocator) void {
-        self.module_dictionary.deinit(allocator);
 
         for (self.map.keys(), self.map.values()) |key_uri, *entry| {
             entry.importers.deinit(allocator);
@@ -85,28 +88,60 @@ const ImportedBy = struct {
         }
         self.map.deinit(allocator);
 
+        var iter = self.module_dictionary.iterator();
+        while (iter.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
 
+
+        self.module_dictionary.deinit(allocator);
     }
     fn addPendingModuleImport(self: *ImportedBy, allocator: std.mem.Allocator, io: std.Io, importer_uri: Uri, module_name: []const u8) error{OutOfMemory}!void {
-        if (self.pending_module_imports) |*list| {
-            self.mutex.lockUncancelable(io);
-            try list.append(allocator, .{ .importer_uri = try importer_uri.dupe(allocator), .module_name = module_name });
-            self.mutex.unlock(io);
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        if (self.pending_module_imports != null) {
+            try self.pending_module_imports.?.append(allocator, .{ .importer_uri = try importer_uri.dupe(allocator), .module_name = try allocator.dupe(u8, module_name) });
         }
     }
     fn resolvePendingModuleImports(self: *ImportedBy, allocator: std.mem.Allocator, io: std.Io, store: *DocumentStore) error{OutOfMemory}!void {
-        if (self.pending_module_imports) |*list| {
-            while (list.pop()) |pending_import| {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
-                defer pending_import.importer_uri.deinit(allocator);
+        if (self.pending_module_imports != null) {
+
+            defer {
+                self.pending_module_imports.?.deinit(allocator);  
+                self.pending_module_imports = null;
+            } 
+
+            // the idea is to make sure that the pending imports array list is always empty
+            // after calling this method. Even if it returns with an error and does not finish iterating
+            // over the list. In that case, the loop will not deinit all pending imports.
+            // In that case, the rest need to be deinited here.
+            errdefer {
+                for (self.pending_module_imports.?.items) |*pending_import| {
+                    pending_import.deinit(allocator);
+                }
+            }
+
+            for (self.pending_module_imports.?.items) |*pending_import| {
+
+
+                defer pending_import.deinit(allocator);
+
+                if (std.mem.eql(u8, pending_import.module_name, "std")) {
+                    continue;
+                }
+
+                std.debug.print("resolving pending import: {s} | ", .{ pending_import.module_name });
 
                 const module_uri = self.module_dictionary.get(pending_import.module_name);
                 if (module_uri == null) continue;
 
 
-                self.mutex.lockUncancelable(io);
                 try self.registerImporter(allocator, module_uri.?, pending_import.importer_uri);
-                self.mutex.unlock(io);
 
                 const handle = store.getHandle(pending_import.importer_uri);
                 if (handle) |hand| {
@@ -114,9 +149,10 @@ const ImportedBy = struct {
                     try hand.file_imports.put(allocator, try module_uri.?.dupe(allocator), {});
                     store.mutex.unlock(io);
                 }
-            }
 
+            }
         }
+
     }
     fn registerModule(self: *ImportedBy, allocator: std.mem.Allocator, module_name: []const u8, module_path: []const u8) error{OutOfMemory}!void {
         const module_name_owned = try allocator.dupe(u8, module_name);
@@ -125,6 +161,7 @@ const ImportedBy = struct {
     fn unregisterModule(self: *ImportedBy, allocator: std.mem.Allocator, module_name: []const u8) void {
         const entry = self.module_dictionary.fetchRemove(module_name).?;
         allocator.free(entry.key);
+        entry.value.deinit(allocator);
     }
     fn registerImporter(self: *ImportedBy, allocator: std.mem.Allocator, imported_uri: Uri, importer_uri: Uri) error{OutOfMemory}!void {
 
@@ -165,7 +202,7 @@ const ImportedBy = struct {
     }
     fn unregisterImporter(self: *ImportedBy, allocator: std.mem.Allocator, import_uri: Uri, importer_uri: Uri) void {
 
-        std.debug.print("unregisterImporter triggered. import_uri: {s} imorter_uri: | ", .{ import_uri.raw });
+        // std.debug.print("unregisterImporter triggered. import_uri: {s} imorter_uri: | ", .{ import_uri.raw });
 
         const index = self.map.getIndex(import_uri).?;
         const entry = &self.map.values()[index];
@@ -201,7 +238,7 @@ const ImportedBy = struct {
                     if (longer_is_old) {
                         try self.registerImporter(allocator, shorter_imports[short_i], shorter.uri);
                     } else {
-                        std.debug.print("calling unregisterImporter from loop over shorter_in_bounds | ", .{});
+                        // std.debug.print("calling unregisterImporter from loop over shorter_in_bounds | ", .{});
                         self.unregisterImporter(allocator, shorter_imports[short_i], shorter.uri);
                     }
                 }
@@ -210,7 +247,7 @@ const ImportedBy = struct {
 
             if (!shorter.file_imports.contains(longer_imports[longer_i])) {
                 if (longer_is_old) {
-                    std.debug.print("calling unregisterImporter from loop over longer_imports | ", .{});
+                    // std.debug.print("calling unregisterImporter from loop over longer_imports | ", .{});
                     self.unregisterImporter(allocator, longer_imports[longer_i], longer.uri);
                 } else {
                     try self.registerImporter(allocator, longer_imports[longer_i], longer.uri);
@@ -233,10 +270,10 @@ const ImportedBy = struct {
         // }
 
         if (old_handle.file_imports.count() > new_handle.file_imports.count()) {
-            std.debug.print("loopOver new handle | ", .{});
+            // std.debug.print("loopOver new handle | ", .{});
             try self.loopOver(allocator, old_handle, true, new_handle);
         } else {
-            std.debug.print("loopOver old handle | ", .{});
+            // std.debug.print("loopOver old handle | ", .{});
             try self.loopOver(allocator, new_handle, false, old_handle);
         }
     }
@@ -247,7 +284,7 @@ const ImportedBy = struct {
         defer self.mutex.unlock(io);
 
         for (handle.file_imports.keys()) |import_uri| {
-            std.debug.print("calling unregisterImporter from onFileDeleted | ", .{});
+            // std.debug.print("calling unregisterImporter from onFileDeleted | ", .{});
             self.unregisterImporter(allocator, import_uri, handle.uri);
         }
 
@@ -741,17 +778,17 @@ pub const Handle = struct {
                 import_string = import_string[1 .. import_string.len - 1];
 
                 if (!std.mem.endsWith(u8, import_string, ".zig")) {
-                    std.debug.print("registering module import: {s} | ", .{ import_string });
+                    // std.debug.print("registering module import: {s} | ", .{ import_string });
                     const module_uri = handle.impl.store.handles_imported_by.module_dictionary.get(import_string);
                     if (module_uri) |mod_uri| {
-                        std.debug.print("found module name in dictionary: {s} | ", .{ mod_uri.raw });
-                        std.debug.print("handle: {s} imports module: {s} | ", .{ handle.uri.raw, mod_uri.raw });
+                        // std.debug.print("found module name in dictionary: {s} | ", .{ mod_uri.raw });
+                        // std.debug.print("handle: {s} imports module: {s} | ", .{ handle.uri.raw, mod_uri.raw });
                         file_imports.putAssumeCapacity(try mod_uri.dupe(allocator), {});
                         handle.impl.store.handles_imported_by.mutex.lock(handle.impl.store.io) catch {};
                         try handle.impl.store.handles_imported_by.registerImporter(allocator, mod_uri, handle.uri);
                         handle.impl.store.handles_imported_by.mutex.unlock(handle.impl.store.io);
                     } else {
-                        std.debug.print("did not find module_imports entry for {s} | ", .{ import_string });
+                        // std.debug.print("did not find module_imports entry for {s} | ", .{ import_string });
                         try handle.impl.store.handles_imported_by.addPendingModuleImport(allocator, handle.impl.store.io, handle.uri, import_string);
                     }
                     continue;
@@ -1024,6 +1061,8 @@ pub fn getOrLoadHandle(self: *DocumentStore, uri: Uri) error{ Canceled, OutOfMem
     defer tracy_zone.end();
 
     if (!uri.isFileScheme()) return self.getHandle(uri);
+
+    std.debug.print("loading handle: {s}", .{ uri.raw });
     return self.createAndStoreDocument(
         uri,
         .uri,
@@ -1534,8 +1573,16 @@ fn loopOverImportTable(
 
         const shorter_in_bounds: bool = short_i < short_keys.len;
 
+        const already_present = imported_by.module_dictionary.contains(module_name);
+        if (already_present) {
+            // std.debug.print("already present: {s} | ", .{ module_name });
+            short_i += 1;
+            continue;
+        }
         if (shorter_in_bounds) {
+
             if (std.mem.eql(u8, module_name, short_keys[short_i])) {
+                // std.debug.print("test: {s} | ", .{ module_name });
                 short_i += 1;
                 continue;
             }
@@ -1774,6 +1821,7 @@ fn invalidateBuildFileWorker(self: *DocumentStore, build_file: *BuildFile) std.I
     self.handles_imported_by.resolvePendingModuleImports(self.allocator, self.io, self) catch |err| {
         log.err("Error while resolving pending module imports: {any}", .{ err });
     };
+
 }
 
 pub fn isBuildFile(uri: Uri) bool {
