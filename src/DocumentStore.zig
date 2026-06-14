@@ -20,24 +20,43 @@ const DocumentStore = @This();
 
 const ImportedBy = struct {
     map: std.StringArrayHashMapUnmanaged(std.ArrayList([]const u8)),
+    internal_modules: std.ArrayList([]const u8),
+    std_path: ?[]u8,
 
-    const empty = ImportedBy{ .map = .empty };
+    const empty = ImportedBy{ .map = .empty, .internal_modules = .empty, .std_path = null };
 
     fn deinit(self: *ImportedBy, allocator: std.mem.Allocator) void {
+
         for (self.map.values()) |*list| {
             list.deinit(allocator);
         }
         self.map.deinit(allocator);
+
+        self.internal_modules.deinit(allocator);
+
+        if (self.std_path != null) {
+            allocator.free(self.std_path.?);
+        }
     }
-    fn registerImport(self: *ImportedBy, allocator: std.mem.Allocator, importer_path: []const u8, imported_path: []const u8) error{OutOfMemory}!void {
+    fn registerImport(self: *ImportedBy, allocator: std.mem.Allocator, importer_path: []const u8, imported_path: []const u8) void {
 
         // register module if not already present
-        const gop = try self.map.getOrPut(allocator, imported_path);
+        const gop = self.map.getOrPut(allocator, imported_path) catch |err| {
+            log.err("Error during registering module import while getOrPut to the hashmap: importer_path: {s} | imported_path: {s} : {any}", .{ importer_path, imported_path, err });
+            return;
+        };
         if (!gop.found_existing) {
             gop.value_ptr.* = .empty;
         }
 
-        try gop.value_ptr.append(allocator, importer_path);
+        gop.value_ptr.append(allocator, importer_path) catch |err| {
+            log.err("Error during registering module import while appending to importers list: importer_path: {s} | imported_path: {s} : {any}", .{ importer_path, imported_path, err });
+        };
+    }
+    fn registerModule(self: *ImportedBy, allocator: std.mem.Allocator, module_path: []const u8) void {
+        self.internal_modules.append(allocator, module_path) catch |err| {
+            log.err("Error during registering internal module: module_path: {s} | error: {any}" , .{ module_path, err });
+        };
     }
 };
 
@@ -1216,22 +1235,6 @@ fn notifyBuildEnd(self: *DocumentStore, status: EndStatus) void {
     };
 }
 
-fn isExternal(build_file_uri: Uri, module_path: []const u8) bool {
-    // file:///path/to/file
-    // I do not want to use allocator to turn the uri to path here as that would require to return an error here and pass it
-    // down through functions. as uri is always the same: file:// + path, it is safe to just take a slice from just the path
-    const build_file_path = build_file_uri.raw[7..];
-
-    // for dirname to return null here, the build file would need to be directly in the root directory
-    // as that will never happen in the actual project, I decided to place orelse unreachable here
-    const project_root = std.Io.Dir.path.dirname(build_file_path) orelse unreachable;
-    if (std.mem.startsWith(u8, module_path, project_root)) {
-        return false;
-    } else {
-        return true;
-    }
-}
-
 fn invalidateBuildFileWorker(self: *DocumentStore, build_file: *BuildFile) std.Io.Cancelable!void {
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
@@ -1283,15 +1286,21 @@ fn invalidateBuildFileWorker(self: *DocumentStore, build_file: *BuildFile) std.I
                 var new_imported_by: ImportedBy = .empty;
                 errdefer new_imported_by.deinit(self.allocator);
 
+                if (self.config.zig_lib_dir.?.path) |std_path| {
+                    new_imported_by.std_path = std.Io.Dir.path.join(self.allocator, &.{ std_path, "std", "std.zig" }) catch |err| blk: {
+                        log.err("Error during creating a path to std root file: {any}", .{ err });
+                        break :blk null;
+                    };
+                }
                 // populate
                 for (build_config.value.modules.map.keys(), build_config.value.modules.map.values()) |importer_path, *importer_module| {
+                    if (importer_module.is_external) {
+                        continue;
+                    }
+                    new_imported_by.registerModule(self.allocator, importer_path);
+
                     for (importer_module.import_table.map.values()) |imported_path| {
-                        if (isExternal(build_file.uri, imported_path)) {
-                            continue;
-                        }
-                        new_imported_by.registerImport(self.allocator, importer_path, imported_path) catch {
-                            log.err("Error during registering module import: importer_path: {s} | imported_path: {s}", .{ importer_path, imported_path });
-                        };
+                        new_imported_by.registerImport(self.allocator, importer_path, imported_path);
                     }
                 }
 

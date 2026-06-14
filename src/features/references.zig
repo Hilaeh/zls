@@ -425,19 +425,38 @@ fn gatherWorkspaceReferenceCandidates(
             // Placed here, it will handle a situation when target handle is the same as root handle.
             // A little of duplication avoids unnecessary second loading of the same build file.
 
+            // TODO Looping and putting module uris into found_uris will allocate and put
+            // uri of the current file's module, but this is already put at the beginning
+            // of this function. It leaks the first uri, which is not deinited.
+            // Arena is used here, so it is not really a big problem, 
+            // but it is still a bad practice.
+
             // This part will add root files of all modules that import this one.
             const imported_by = store.modules_imported_by.map.get(resolved.root_source_file);
 
             if (imported_by) |importer_list| {
                 for (importer_list.items) |importer_path| {
                     const importer_uri = try Uri.fromPath(arena, importer_path);
-                    try found_uris.put(arena, importer_uri, {});
+                    const gop = try found_uris.getOrPut(arena, importer_uri);
+                    if (gop.found_existing) {
+                        importer_uri.deinit(arena);
+                    }
                 }
             }
         } else {
 
             switch (try resolveAssociatedBuildFile(store, target_handle)) {
-                .unresolved, .none => {},
+                .unresolved, .none => {
+                    // If the definition is in an external module without build file,
+                    // mainly std, scan all modules in the workspace to find references only in the project.
+                    for (store.modules_imported_by.internal_modules.items) |module_path| {
+                        const module_uri: Uri = try .fromPath(arena, module_path);
+                        const gop = try found_uris.getOrPut(arena, module_uri);
+                        if (gop.found_existing) {
+                            module_uri.deinit(arena);
+                        }
+                    }
+                },
                 .resolved => |resolved2| {
 
                     const target_module_root_uri: Uri = try .fromPath(arena, resolved2.root_source_file);
@@ -451,7 +470,10 @@ fn gatherWorkspaceReferenceCandidates(
                     if (imported_by) |importer_list| {
                         for (importer_list.items) |importer_path| {
                             const importer_uri = try Uri.fromPath(arena, importer_path);
-                            try found_uris.put(arena, importer_uri, {});
+                            const gop = try found_uris.getOrPut(arena, importer_uri);
+                            if (gop.found_existing) {
+                                importer_uri.deinit(arena);
+                            }
                         }
                     }
                 },
