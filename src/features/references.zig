@@ -435,7 +435,8 @@ fn gatherWorkspaceReferenceCandidates(
             const imported_by = store.modules_imported_by.map.get(resolved.root_source_file);
 
             if (imported_by) |importer_list| {
-                for (importer_list.items) |importer_path| {
+                for (importer_list.keys()) |importer_path| {
+                    std.debug.print("importer: {s}", .{ importer_path });
                     const importer_uri = try Uri.fromPath(arena, importer_path);
                     const gop = try found_uris.getOrPut(arena, importer_uri);
                     if (gop.found_existing) {
@@ -449,7 +450,7 @@ fn gatherWorkspaceReferenceCandidates(
                 .unresolved, .none => {
                     // If the definition is in an external module without build file,
                     // mainly std, scan all modules in the workspace to find references only in the project.
-                    for (store.modules_imported_by.internal_modules.items) |module_path| {
+                    for (store.modules_imported_by.map.keys()) |module_path| {
                         const module_uri: Uri = try .fromPath(arena, module_path);
                         const gop = try found_uris.getOrPut(arena, module_uri);
                         if (gop.found_existing) {
@@ -468,7 +469,7 @@ fn gatherWorkspaceReferenceCandidates(
                     const imported_by = store.modules_imported_by.map.get(resolved2.root_source_file);
 
                     if (imported_by) |importer_list| {
-                        for (importer_list.items) |importer_path| {
+                        for (importer_list.keys()) |importer_path| {
                             const importer_uri = try Uri.fromPath(arena, importer_path);
                             const gop = try found_uris.getOrPut(arena, importer_uri);
                             if (gop.found_existing) {

@@ -19,7 +19,6 @@ pub const BuildConfig = struct {
         import_table: std.json.ArrayHashMap([]const u8),
         c_macros: []const []const u8,
         include_dirs: []const []const u8,
-        is_external: bool,
     };
 
     pub const Compile = struct {

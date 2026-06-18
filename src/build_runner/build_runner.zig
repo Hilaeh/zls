@@ -1036,10 +1036,8 @@ fn extractBuildInformation(
             modules: *std.array_hash_map.String(shared.BuildConfig.Module),
             module: *std.Build.Module,
             compile: ?*Step.Compile,
-            build: *std.Build,
         ) !void {
             const root_source_file = module.root_source_file orelse return;
-            const is_external = module.owner != build;
 
             var include_dirs: std.array_hash_map.String(void) = .empty;
             var c_macros: std.array_hash_map.String(void) = .empty;
@@ -1100,7 +1098,6 @@ fn extractBuildInformation(
                 .import_table = .{},
                 .c_macros = &.{},
                 .include_dirs = &.{},
-                .is_external = is_external,
             });
 
             for (module.import_table.keys(), module.import_table.values()) |name, import| {
@@ -1203,7 +1200,7 @@ fn extractBuildInformation(
     for (b.modules.values()) |root_module| {
         const graph = root_module.getGraph();
         for (graph.modules) |module| {
-            try helper.processModule(arena, &modules, module, null, b);
+            try helper.processModule(arena, &modules, module, null);
         }
     }
 
@@ -1215,7 +1212,7 @@ fn extractBuildInformation(
             const compile = step.cast(Step.Compile) orelse continue;
             const graph = compile.root_module.getGraph();
             for (graph.modules) |module| {
-                try helper.processModule(arena, &modules, module, compile, b);
+                try helper.processModule(arena, &modules, module, compile);
             }
         }
     }

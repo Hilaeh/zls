@@ -18,21 +18,26 @@ const TrigramStore = @import("TrigramStore.zig");
 
 const DocumentStore = @This();
 
+const ModuleEntry = struct {
+    importers: std.StringArrayHashMapUnmanaged(void),
+    registered: bool,
+
+    const direct = ModuleEntry{ .importers = .empty, .registered = true };
+    const via_import = ModuleEntry{ .importers = .empty, .registered = false };
+};
+
 const ImportedBy = struct {
-    map: std.StringArrayHashMapUnmanaged(std.ArrayList([]const u8)),
-    internal_modules: std.ArrayList([]const u8),
+    map: std.StringArrayHashMapUnmanaged(ModuleEntry),
     std_path: ?[]u8,
 
-    const empty = ImportedBy{ .map = .empty, .internal_modules = .empty, .std_path = null };
+    const empty = ImportedBy{ .map = .empty, .std_path = null };
 
     fn deinit(self: *ImportedBy, allocator: std.mem.Allocator) void {
 
-        for (self.map.values()) |*list| {
-            list.deinit(allocator);
+        for (self.map.values()) |*entry| {
+            entry.importers.deinit(allocator);
         }
         self.map.deinit(allocator);
-
-        self.internal_modules.deinit(allocator);
 
         if (self.std_path != null) {
             allocator.free(self.std_path.?);
@@ -46,17 +51,62 @@ const ImportedBy = struct {
             return;
         };
         if (!gop.found_existing) {
-            gop.value_ptr.* = .empty;
+            gop.value_ptr.* = .via_import;
         }
 
-        gop.value_ptr.append(allocator, importer_path) catch |err| {
+        gop.value_ptr.importers.put(allocator, importer_path, {}) catch |err| {
             log.err("Error during registering module import while appending to importers list: importer_path: {s} | imported_path: {s} : {any}", .{ importer_path, imported_path, err });
         };
     }
-    fn registerModule(self: *ImportedBy, allocator: std.mem.Allocator, module_path: []const u8) void {
-        self.internal_modules.append(allocator, module_path) catch |err| {
+    fn unregisterImport(self: *ImportedBy, importer_path: []const u8, imported_path: []const u8) void {
+        const maybe_entry = self.map.getPtr(imported_path);
+        if (maybe_entry) |entry| {
+            _ = entry.importers.swapRemove(importer_path);
+
+            if (!entry.registered) {
+                _ = self.map.swapRemove(imported_path);
+            }
+        }
+    }
+    fn ensureModuleRegistered(self: *ImportedBy, allocator: std.mem.Allocator, module_path: []const u8, module: *BuildConfig.Module) void {
+        const gop = self.map.getOrPut(allocator, module_path) catch |err| {
             log.err("Error during registering internal module: module_path: {s} | error: {any}" , .{ module_path, err });
+            return;
         };
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .direct;
+
+            for (module.import_table.map.values()) |imported_path| {
+                gop.value_ptr.importers.put(allocator, imported_path, {}) catch |err| {
+                    log.err("Error during registering import of module: module_path: {s} imported_path: {s} error: {any}", .{ module_path, imported_path, err });
+                };
+            }
+        }
+    }
+    fn unregisterModule(self: *ImportedBy, module_path: []const u8, module: *BuildConfig.Module) void {
+        const maybe_entry = self.map.getPtr(module_path);
+        if (maybe_entry) |entry| {
+
+            for (module.import_table.map.values()) |imported_path| {
+                self.unregisterImport(module_path, imported_path);
+            }
+
+            if (entry.importers.count() == 0) {
+                _ = self.map.swapRemove(module_path);
+            } else {
+                entry.registered = false;
+            }
+        }
+    }
+};
+
+const ImportedByBuildFile = struct {
+    map: std.StringArrayHashMapUnmanaged(std.ArrayList([]const u8)),
+
+    const empty = ImportedByBuildFile{ .map = .empty };
+
+    fn deinit(self: *ImportedByBuildFile) void {
+
     }
 };
 
@@ -69,7 +119,8 @@ io: std.Io,
     wait_group: if (supports_build_system) std.Io.Group else void = if (supports_build_system) .init else {},
     handles: Uri.ArrayHashMap(*Handle.Future) = .empty,
     build_files: if (supports_build_system) Uri.ArrayHashMap(*BuildFile) else void = if (supports_build_system) .empty else {},
-    modules_imported_by: ImportedBy = .empty,
+    modules_imported_by: std.StringArrayHashMapUnmanaged(ImportedBy) = .empty,
+
     cimports: if (supports_build_system) std.array_hash_map.Auto(CImportHash, translate_c.Result) else void = if (supports_build_system) .empty else {},
     diagnostics_collection: *DiagnosticsCollection,
     builds_in_progress: std.atomic.Value(i32) = .init(0),
@@ -102,6 +153,9 @@ pub const BuildFile = struct {
     builtin_uri: ?Uri = null,
     /// config options extracted from zls.build.json
     build_associated_config: ?std.json.Parsed(BuildAssociatedConfig) = null,
+
+    modules_imported_by: ImportedBy = .empty,
+
     impl: struct {
         mutex: std.Io.Mutex = .init,
         build_runner_state: BuildRunnerState = .idle,
@@ -200,6 +254,7 @@ pub const BuildFile = struct {
         if (self.impl.config) |cfg| cfg.deinit();
         if (self.builtin_uri) |builtin_uri| builtin_uri.deinit(allocator);
         if (self.build_associated_config) |cfg| cfg.deinit();
+        self.modules_imported_by.deinit(allocator);
     }
 };
 
@@ -750,7 +805,16 @@ pub fn deinit(self: *DocumentStore) void {
     }
     self.handles.deinit(self.allocator);
 
+    for (self.modules_imported_by.keys(), self.modules_imported_by.values()) |workspace_path, *imported_by| {
+        self.allocator.free(workspace_path);
+        imported_by.deinit(self.allocator);
+    }
     self.modules_imported_by.deinit(self.allocator);
+
+    // for (self.workspace_paths.keys()) |path| {
+    //     self.allocator.free(path);
+    // }
+    // self.workspace_paths.deinit(self.allocator);
 
     if (supports_build_system) {
         for (self.build_files.values()) |build_file| {
@@ -835,7 +899,28 @@ pub fn getOrLoadHandle(self: *DocumentStore, uri: Uri) error{ Canceled, OutOfMem
             .override = false,
             .load_build_file_behaviour = .never,
         },
-        ) catch |err| switch (err) {
+        null
+    ) catch |err| switch (err) {
+        error.Canceled, error.OutOfMemory => |e| return e,
+        else => return null,
+    };
+}
+
+pub fn getOrLoadHandleForWorkspace(self: *DocumentStore, uri: Uri, workspace_path: []const u8) error{ Canceled, OutOfMemory }!?*Handle {
+    const tracy_zone = tracy.trace(@src());
+    defer tracy_zone.end();
+
+    if (!uri.isFileScheme()) return self.getHandle(uri);
+    return self.createAndStoreDocument(
+        uri,
+        .uri,
+        .{
+            .lsp_synced = false,
+            .override = false,
+            .load_build_file_behaviour = .never,
+        },
+        workspace_path,
+    ) catch |err| switch (err) {
         error.Canceled, error.OutOfMemory => |e| return e,
         else => return null,
     };
@@ -853,7 +938,7 @@ pub fn getBuildFile(self: *DocumentStore, uri: Uri) ?*BuildFile {
 /// invalidates any pointers into `DocumentStore.build_files`
 /// **Thread safe** takes an exclusive lock
 /// This function does not protect against data races from modifying the BuildFile
-fn getOrLoadBuildFile(self: *DocumentStore, uri: Uri) error{ Canceled, OutOfMemory }!*BuildFile {
+fn getOrLoadBuildFile(self: *DocumentStore, uri: Uri, workspace_path: ?[]const u8) error{ Canceled, OutOfMemory }!*BuildFile {
     comptime std.debug.assert(supports_build_system);
 
     if (self.getBuildFile(uri)) |build_file| return build_file;
@@ -869,7 +954,7 @@ fn getOrLoadBuildFile(self: *DocumentStore, uri: Uri) error{ Canceled, OutOfMemo
         gop.value_ptr.* = try self.allocator.create(BuildFile);
         errdefer self.allocator.destroy(gop.value_ptr.*);
 
-        gop.value_ptr.*.* = try self.createBuildFile(uri);
+        gop.value_ptr.*.* = try self.createBuildFile(uri, workspace_path);
         gop.key_ptr.* = gop.value_ptr.*.uri;
         break :blk gop.value_ptr.*;
     };
@@ -902,7 +987,8 @@ pub fn openLspSyncedDocument(self: *DocumentStore, uri: Uri, text: []const u8) e
             .override = true,
             .load_build_file_behaviour = .load_but_dont_update,
         },
-        ) catch |err| switch (err) {
+        null,
+    ) catch |err| switch (err) {
         error.Canceled, error.OutOfMemory => |e| return e,
         else => unreachable,
     };
@@ -957,7 +1043,8 @@ pub fn refreshLspSyncedDocument(self: *DocumentStore, uri: Uri, new_text: [:0]co
             .override = true,
             .load_build_file_behaviour = .only_update,
         },
-        ) catch |err| switch (err) {
+        null,
+    ) catch |err| switch (err) {
         error.Canceled, error.OutOfMemory => |e| return e,
         else => unreachable,
     };
@@ -991,7 +1078,8 @@ pub fn refreshDocumentFromFileSystem(self: *DocumentStore, uri: Uri, should_dele
                 .override = true,
                 .load_build_file_behaviour = .only_update,
             },
-            ) catch |err| switch (err) {
+            null,
+        ) catch |err| switch (err) {
             error.Canceled, error.OutOfMemory => |e| return e,
             else => return false,
         };
@@ -1022,7 +1110,9 @@ pub fn loadDirectoryRecursive(store: *DocumentStore, directory_uri: Uri) LoadDir
     defer tracy_zone.end();
 
     const workspace_path = try directory_uri.toFsPath(store.allocator);
-    defer store.allocator.free(workspace_path);
+    // defer store.allocator.free(workspace_path);
+    // try store.workspace_paths.put(store.allocator, workspace_path, {});
+    try store.modules_imported_by.put(store.allocator, workspace_path, .empty);
 
     var workspace_dir = try std.Io.Dir.cwd().openDir(store.io, workspace_path, .{ .iterate = true });
     defer workspace_dir.close(store.io);
@@ -1035,8 +1125,9 @@ pub fn loadDirectoryRecursive(store: *DocumentStore, directory_uri: Uri) LoadDir
             s: *DocumentStore,
             uri: Uri,
             did_out_of_memory: *std.atomic.Value(bool),
+            workspace_path_: []const u8,
         ) std.Io.Cancelable!void {
-            _ = s.getOrLoadHandle(uri) catch |err| switch (err) {
+            _ = s.getOrLoadHandleForWorkspace(uri, workspace_path_) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 error.OutOfMemory => did_out_of_memory.store(true, .release),
             };
@@ -1069,7 +1160,7 @@ pub fn loadDirectoryRecursive(store: *DocumentStore, directory_uri: Uri) LoadDir
         const uri: Uri = try .fromPath(store.allocator, path);
         errdefer comptime unreachable;
 
-        group.async(store.io, getOrLoadHandleVoid, .{ store, uri, &did_out_of_memory });
+        group.async(store.io, getOrLoadHandleVoid, .{ store, uri, &did_out_of_memory, workspace_path });
     }
     try group.await(store.io);
 
@@ -1234,11 +1325,20 @@ fn notifyBuildEnd(self: *DocumentStore, status: EndStatus) void {
         },
     };
 }
+fn isExternal(project_root: []const u8, module_path: []const u8) bool {
 
+    if (!std.mem.startsWith(u8, module_path, project_root)) {
+        return true;
+    }
+    if (std.mem.find(u8, module_path[project_root.len..], "/zig-pkg/") != null) {
+        return true;
+    } 
+    return false;
+}
 fn invalidateBuildFileWorker(self: *DocumentStore, build_file: *BuildFile) std.Io.Cancelable!void {
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
-
+    std.debug.print("test", .{});
     {
         try build_file.impl.mutex.lock(self.io);
         defer build_file.impl.mutex.unlock(self.io);
@@ -1283,30 +1383,33 @@ fn invalidateBuildFileWorker(self: *DocumentStore, build_file: *BuildFile) std.I
                 build_file.impl.mutex.unlock(self.io);
 
 
-                var new_imported_by: ImportedBy = .empty;
-                errdefer new_imported_by.deinit(self.allocator);
+                for (build_file.workspaces.keys(), build_file.workspaces.values()) |workspace_path, imported_by| {
 
-                if (self.config.zig_lib_dir.?.path) |std_path| {
-                    new_imported_by.std_path = std.Io.Dir.path.join(self.allocator, &.{ std_path, "std", "std.zig" }) catch |err| blk: {
-                        log.err("Error during creating a path to std root file: {any}", .{ err });
-                        break :blk null;
-                    };
-                }
-                // populate
-                for (build_config.value.modules.map.keys(), build_config.value.modules.map.values()) |importer_path, *importer_module| {
-                    if (importer_module.is_external) {
-                        continue;
+                    if (self.config.zig_lib_dir.?.path != null and imported_by.std_path == null) {
+                        imported_by.std_path = std.Io.Dir.path.join(self.allocator, &.{ self.config.zig_lib_dir.?.path.?, "std", "std.zig" }) catch |err| blk: {
+                            log.err("Error during creating a path to std root file: {any}", .{ err });
+                            break :blk null;
+                        };
                     }
-                    new_imported_by.registerModule(self.allocator, importer_path);
-
-                    for (importer_module.import_table.map.values()) |imported_path| {
-                        new_imported_by.registerImport(self.allocator, importer_path, imported_path);
+                    // remove old
+                    if (old_config) |config| {
+                        for (config.value.modules.map.keys(), config.value.modules.map.values()) |importer_path, *importer_module| {
+                            if (isExternal(workspace_path, importer_path)) {
+                                continue;
+                            }
+                            // std.debug.print("Registering module: {s} | ", .{ importer_path });
+                            imported_by.unregisterModule(importer_path, importer_module);
+                        }
+                    }
+                    // populate
+                    for (build_config.value.modules.map.keys(), build_config.value.modules.map.values()) |importer_path, *importer_module| {
+                        if (isExternal(workspace_path, importer_path)) {
+                            continue;
+                        }
+                        // std.debug.print("Registering module: {s} | ", .{ importer_path });
+                        imported_by.ensureModuleRegistered(self.allocator, importer_path, importer_module);
                     }
                 }
-
-                var old_imported_by = self.modules_imported_by;
-                self.modules_imported_by = new_imported_by;
-                old_imported_by.deinit(self.allocator);
 
 
                 if (old_config) |*config| config.deinit();
@@ -1579,7 +1682,7 @@ fn collectPotentialBuildFiles(self: *DocumentStore, uri: Uri) error{ Canceled, O
         const build_file_uri: Uri = try .fromPath(self.allocator, build_path);
         defer build_file_uri.deinit(self.allocator);
 
-        const build_file = try self.getOrLoadBuildFile(build_file_uri);
+        const build_file = try self.getOrLoadBuildFile(build_file_uri, null);
         potential_build_files.appendAssumeCapacity(build_file);
     }
     // The potential build files that come first should have higher priority.
@@ -1592,7 +1695,7 @@ fn collectPotentialBuildFiles(self: *DocumentStore, uri: Uri) error{ Canceled, O
     return try potential_build_files.toOwnedSlice(self.allocator);
 }
 
-fn createBuildFile(self: *DocumentStore, uri: Uri) error{ Canceled, OutOfMemory }!BuildFile {
+fn createBuildFile(self: *DocumentStore, uri: Uri, workspace_path: ?[]const u8) error{ Canceled, OutOfMemory }!BuildFile {
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
@@ -1617,6 +1720,10 @@ fn createBuildFile(self: *DocumentStore, uri: Uri) error{ Canceled, OutOfMemory 
         else => {
             log.debug("Failed to load config associated with build file {s} (error: {})", .{ build_file.uri.raw, err });
         },
+    }
+
+    if (workspace_path) |path| {
+        try build_file.addToWorkspace(self.allocator, path, self);
     }
 
     log.info("Loaded build file '{s}'", .{build_file.uri.raw});
@@ -1644,6 +1751,7 @@ fn createAndStoreDocument(
     /// `file_source == .text` implies `options.lsp_synced == true`.
     file_source: FileSource,
     options: CreateAndStoreOptions,
+    workspace_path: ?[]const u8,
 ) ReadFileError!*Handle {
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
@@ -1663,7 +1771,7 @@ fn createAndStoreDocument(
     if (supports_build_system and options.lsp_synced and isBuildFile(uri) and !isInStd(uri)) {
         switch (options.load_build_file_behaviour) {
             .load_but_dont_update => {
-                _ = try store.getOrLoadBuildFile(uri);
+                _ = try store.getOrLoadBuildFile(uri, workspace_path);
             },
             .only_update => {
                 store.invalidateBuildFile(uri);
