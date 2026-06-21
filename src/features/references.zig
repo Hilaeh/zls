@@ -399,6 +399,74 @@ fn resolveAssociatedBuildFile(
     return handle.getAssociatedBuildFile(store);
 }
 
+fn collectAllModulesInBuildFile(arena: std.mem.Allocator, found_uris: *Uri.ArrayHashMap(void), build_file: *DocumentStore.BuildFile) error{OutOfMemory}!void {
+    for (build_file.modules_imported_by.map.keys()) |module_path| {
+        const module_uri: Uri = try .fromPath(arena, module_path);
+        const gop = try found_uris.getOrPut(arena, module_uri);
+        if (gop.found_existing) {
+            module_uri.deinit(arena);
+        }
+    }
+}
+
+/// Returns true if at least one build file was found.
+fn collectAllInternalBuildFiles(arena: std.mem.Allocator, found_uris: *Uri.ArrayHashMap(void), store: *DocumentStore) error{OutOfMemory}!bool {
+
+    const build_files = store.build_files.values();
+
+    if (build_files.len == 0) return false;
+
+    for (build_files) |build_file| {
+        if (!build_file.is_external) {
+            try collectAllModulesInBuildFile(arena, found_uris, build_file);
+        }
+    }
+
+    return true;
+}
+
+fn collectAllImporterModulesInBuildFile(arena: std.mem.Allocator, found_uris: *Uri.ArrayHashMap(void), resolved: *const DocumentStore.Handle.AssociatedBuildFile.Resolved) error{OutOfMemory}!void {
+
+    // This part will add root files of all modules that import this one.
+    const imported_by = resolved.build_file.modules_imported_by.map.get(resolved.root_source_file);
+
+    if (imported_by) |importer_list| {
+        for (importer_list.items) |importer_path| {
+            // std.debug.print("importer: {s}", .{ importer_path });
+            const importer_uri = try Uri.fromPath(arena, importer_path);
+            const gop = try found_uris.getOrPut(arena, importer_uri);
+            if (gop.found_existing) {
+                importer_uri.deinit(arena);
+            }
+        }
+    }
+}
+
+// Caller owns memory.
+fn isDependencyOfWhat(arena: std.mem.Allocator, build_file: *DocumentStore.BuildFile, store: *DocumentStore) error{OutOfMemory}![]*DocumentStore.BuildFile {
+
+    const build_file_path = build_file.uri.toFsPath(arena) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.UnsupportedScheme => return &.{},
+    };
+    const build_file_dir = std.Io.Dir.path.dirname(build_file_path) orelse return &.{};
+
+
+    var build_files: std.ArrayList(*DocumentStore.BuildFile) = .empty;
+
+    for (store.build_files.values()) |check_build_file| {
+
+        const build_config = check_build_file.impl.config orelse continue;
+        for (build_config.value.dependencies.map.values()) |dep_path| {
+            if (std.mem.eql(u8, build_file_dir, dep_path)) {
+                try build_files.append(arena, check_build_file);
+                break;
+            }
+        }
+    }
+    return try build_files.toOwnedSlice(arena);
+}
+
 fn gatherWorkspaceReferenceCandidates(
     store: *DocumentStore,
     arena: std.mem.Allocator,
@@ -408,75 +476,136 @@ fn gatherWorkspaceReferenceCandidates(
     target_handle: *DocumentStore.Handle,
 ) Analyser.Error!Uri.ArrayHashMap(void) {
     if (DocumentStore.supports_build_system) no_build_file: {
+        // if (DocumentStore.supports_build_system) {
         const resolved = switch (try resolveAssociatedBuildFile(store, root_handle)) {
             .unresolved => return .empty, 
-            .none => break :no_build_file,
+            // .none => break :no_build_file,
+            .none => {
+                // looking outside of a build file for something...
+                // should I care about the location of the definition?
+                // probably this should search all internals.
+                // how do I do this though without adding complexity?
+                // make a special case here with declaring found uris and populating it here?
+                // and doing return here?
+                std.debug.print("root no build file | ", .{});
+                var found_uris: Uri.ArrayHashMap(void) = .empty;
+
+                const found_some = try collectAllInternalBuildFiles(arena, &found_uris, store);
+                if (!found_some) {
+                    break :no_build_file;
+                }
+
+                var i: usize = 0;
+                while (i < found_uris.count()) : (i += 1) {
+                    const uri = found_uris.keys()[i];
+                    const handle = try store.getOrLoadHandle(uri) orelse continue;
+
+                    try found_uris.ensureUnusedCapacity(arena, handle.file_imports.len);
+                    for (handle.file_imports) |import_uri| found_uris.putAssumeCapacity(import_uri, {});
+                }
+                return found_uris;
+            }, 
             .resolved => |resolved| resolved,
         };
 
-        const root_module_root_uri: Uri = try .fromPath(arena, resolved.root_source_file);
+        // const root_module_root_uri: Uri = try .fromPath(arena, resolved.root_source_file);
 
         var found_uris: Uri.ArrayHashMap(void) = .empty;
-        try found_uris.put(arena, root_module_root_uri, {});
+        // try found_uris.put(arena, root_module_root_uri, {});
 
 
+        // a handle will be assigned to only one build file, so if the handles are the same,
+        // then it is safe to assue that both build files are the same too.
         if (root_handle.uri.eql(target_handle.uri)) {
 
-            // Placed here, it will handle a situation when target handle is the same as root handle.
-            // A little of duplication avoids unnecessary second loading of the same build file.
+            std.debug.print("root and target the same | ", .{});
 
-            // TODO Looping and putting module uris into found_uris will allocate and put
-            // uri of the current file's module, but this is already put at the beginning
-            // of this function. It leaks the first uri, which is not deinited.
-            // Arena is used here, so it is not really a big problem, 
-            // but it is still a bad practice.
+            const files = try isDependencyOfWhat(arena, resolved.build_file, store);
+            if (files.len == 0) {
+                // is not a dependency of anything
 
-            // This part will add root files of all modules that import this one.
-            const imported_by = store.modules_imported_by.map.get(resolved.root_source_file);
-
-            if (imported_by) |importer_list| {
-                for (importer_list.keys()) |importer_path| {
-                    std.debug.print("importer: {s}", .{ importer_path });
-                    const importer_uri = try Uri.fromPath(arena, importer_path);
-                    const gop = try found_uris.getOrPut(arena, importer_uri);
-                    if (gop.found_existing) {
-                        importer_uri.deinit(arena);
-                    }
-                }
             }
-        } else {
 
+            if (resolved.build_file.is_external) {
+                std.debug.print("root external | ", .{});
+                // user opens a project (internal), then opens a file from a dependency (external),
+                // then from within that file searches for references.
+                _ = try collectAllInternalBuildFiles(arena, &found_uris, store);
+                try collectAllImporterModulesInBuildFile(arena, &found_uris, &resolved);
+            } else {
+                std.debug.print("root internal | {s}", .{ resolved.build_file.uri.raw });
+                // user searches for references within the opened project.
+                try collectAllImporterModulesInBuildFile(arena, &found_uris, &resolved);
+            }
+
+
+
+        } else {
             switch (try resolveAssociatedBuildFile(store, target_handle)) {
                 .unresolved, .none => {
                     // If the definition is in an external module without build file,
                     // mainly std, scan all modules in the workspace to find references only in the project.
-                    for (store.modules_imported_by.map.keys()) |module_path| {
-                        const module_uri: Uri = try .fromPath(arena, module_path);
-                        const gop = try found_uris.getOrPut(arena, module_uri);
-                        if (gop.found_existing) {
-                            module_uri.deinit(arena);
-                        }
+                    // wouldnt that be handled better by the code outside the block 
+                    // that searches in all handles?
+
+                    if (resolved.build_file.is_external) {
+                        // looking in external for something that does not have a build file.
+                        // search all internals or just the external one?
+                        // a user is searching for references on std inside a dependency
+
+                        std.debug.print("root external and target no build file | ", .{});
+                        try collectAllModulesInBuildFile(arena, &found_uris, resolved.build_file);
+                    } else {
+                        std.debug.print("root internal and target no build file |", .{});
+                        try collectAllModulesInBuildFile(arena, &found_uris, resolved.build_file);
                     }
+
+
+                    // try collectAllModulesInBuildFile(arena, &found_uris, resolved.build_file);
                 },
                 .resolved => |resolved2| {
 
-                    const target_module_root_uri: Uri = try .fromPath(arena, resolved2.root_source_file);
-                    // also search through the module in which the symbol has been defined
-                    try found_uris.put(arena, target_module_root_uri, {});
+                    if (resolved.build_file.is_external) {
 
+                        if (resolved2.build_file.is_external) {
+                            // example:
+                            // user has a project opened (internal), then they open a file from a dependency (external)
+                            // where they search for references for something defined in a dependency (external) of that dependency.
+                            // project -> dep (search) -> dep (definition)
+                            // user might care about all references, also the ones from the project,
+                            // but we do not know which internal project, so we scan all
+                            // in most cases it will only be one
+                            std.debug.print("root external and target external | ", .{});
+                            _ = try collectAllInternalBuildFiles(arena, &found_uris, store);
+                            try collectAllImporterModulesInBuildFile(arena, &found_uris, &resolved2);
+                        } else {
+                            // user has a dependency opened, 
+                            // then they open a file from a project that imports the dependency.
+                            // in this project (external) they search for something that
+                            // is defined in the dependency (internal).
 
-                    // This part will add root files of all modules that import this one.
-                    const imported_by = store.modules_imported_by.map.get(resolved2.root_source_file);
-
-                    if (imported_by) |importer_list| {
-                        for (importer_list.keys()) |importer_path| {
-                            const importer_uri = try Uri.fromPath(arena, importer_path);
-                            const gop = try found_uris.getOrPut(arena, importer_uri);
-                            if (gop.found_existing) {
-                                importer_uri.deinit(arena);
-                            }
+                            std.debug.print("root external and target internal | ", .{});
+                            try collectAllImporterModulesInBuildFile(arena, &found_uris, &resolved2);
                         }
-                    }
+
+                    } else {
+                        if (resolved2.build_file.is_external) {
+                            // user searches from within the project (internal) for something
+                            // defined in a dependency (external)
+
+                            std.debug.print("root internal and target external | ", .{});
+                            try collectAllImporterModulesInBuildFile(arena, &found_uris, &resolved);
+                        } else {
+                            // user searches from within one internal project for something
+                            // defined in a dependency that is in another internal project,
+                            // for example a project with its own build file within the main project,
+                            // or a dependency opened inside a second workspace, that will be 
+                            // categorized as internal
+                            std.debug.print("root internal and target internal | ", .{});
+                            try collectAllImporterModulesInBuildFile(arena, &found_uris, &resolved);
+                        }
+                    } 
+
                 },
 
             }
@@ -516,422 +645,422 @@ fn gatherWorkspaceReferenceCandidates(
     }
 
     return found_uris;
-}
-fn controlFlowReferences(
-    allocator: std.mem.Allocator,
-    token_handle: Analyser.TokenWithHandle,
-    encoding: offsets.Encoding,
-    include_decl: bool,
-) error{OutOfMemory}!std.ArrayList(types.Location) {
-    const handle = token_handle.handle;
-    const tree = &handle.tree;
-    const kw_token = token_handle.token;
+    }
+    fn controlFlowReferences(
+        allocator: std.mem.Allocator,
+        token_handle: Analyser.TokenWithHandle,
+        encoding: offsets.Encoding,
+        include_decl: bool,
+    ) error{OutOfMemory}!std.ArrayList(types.Location) {
+        const handle = token_handle.handle;
+        const tree = &handle.tree;
+        const kw_token = token_handle.token;
 
-    var results: std.ArrayList(Ast.TokenIndex) = .empty;
-    defer results.deinit(allocator);
+        var results: std.ArrayList(Ast.TokenIndex) = .empty;
+        defer results.deinit(allocator);
 
-    switch (tree.tokenTag(kw_token)) {
-        .keyword_continue,
-        .keyword_break,
-        => {
-            const nodes = try ast.nodesOverlappingIndex(allocator, tree, handle.tree.tokenStart(kw_token));
-            defer allocator.free(nodes);
+        switch (tree.tokenTag(kw_token)) {
+            .keyword_continue,
+            .keyword_break,
+            => {
+                const nodes = try ast.nodesOverlappingIndex(allocator, tree, handle.tree.tokenStart(kw_token));
+                defer allocator.free(nodes);
 
-            const maybe_label = blk: {
-                if (kw_token + 2 >= tree.tokens.len) break :blk null;
-                if (tree.tokenTag(kw_token + 1) != .colon) break :blk null;
-                if (tree.tokenTag(kw_token + 2) != .identifier) break :blk null;
-                break :blk offsets.identifierTokenToNameSlice(tree, kw_token + 2);
-            };
-            for (nodes) |node| switch (tree.nodeTag(node)) {
-                .for_simple,
-                .@"for",
-                .while_cont,
-                .while_simple,
-                .@"while",
-                => {
-                    // if the break/continue is unlabeled it must belong to the first loop we encounter
-                    const main_token = tree.nodeMainToken(node);
-                    const label = maybe_label orelse break try results.append(allocator, main_token);
-                    const loop_label = if (tree.isTokenPrecededByTags(main_token, &.{ .identifier, .colon }))
-                        offsets.identifierTokenToNameSlice(tree, main_token - 2)
-                        else
-                            continue;
-                        if (std.mem.eql(u8, label, loop_label)) {
-                            try results.append(allocator, main_token);
-                        }
-                    },
-                    .switch_comma,
-                    .@"switch",
+                const maybe_label = blk: {
+                    if (kw_token + 2 >= tree.tokens.len) break :blk null;
+                    if (tree.tokenTag(kw_token + 1) != .colon) break :blk null;
+                    if (tree.tokenTag(kw_token + 2) != .identifier) break :blk null;
+                    break :blk offsets.identifierTokenToNameSlice(tree, kw_token + 2);
+                };
+                for (nodes) |node| switch (tree.nodeTag(node)) {
+                    .for_simple,
+                    .@"for",
+                    .while_cont,
+                    .while_simple,
+                    .@"while",
                     => {
-                        const label = maybe_label orelse continue;
+                        // if the break/continue is unlabeled it must belong to the first loop we encounter
                         const main_token = tree.nodeMainToken(node);
-                        const switch_label = if (tree.tokenTag(main_token) == .identifier)
-                            offsets.identifierTokenToNameSlice(tree, main_token)
+                        const label = maybe_label orelse break try results.append(allocator, main_token);
+                        const loop_label = if (tree.isTokenPrecededByTags(main_token, &.{ .identifier, .colon }))
+                            offsets.identifierTokenToNameSlice(tree, main_token - 2)
                             else
                                 continue;
-                            if (std.mem.eql(u8, label, switch_label)) {
-                                try results.append(
-                                    allocator,
-                                    // we already know the switch is labeled so we can just offset
-                                    main_token + 2,
-                                );
+                            if (std.mem.eql(u8, label, loop_label)) {
+                                try results.append(allocator, main_token);
+                            }
+                        },
+                        .switch_comma,
+                        .@"switch",
+                        => {
+                            const label = maybe_label orelse continue;
+                            const main_token = tree.nodeMainToken(node);
+                            const switch_label = if (tree.tokenTag(main_token) == .identifier)
+                                offsets.identifierTokenToNameSlice(tree, main_token)
+                                else
+                                    continue;
+                                if (std.mem.eql(u8, label, switch_label)) {
+                                    try results.append(
+                                        allocator,
+                                        // we already know the switch is labeled so we can just offset
+                                        main_token + 2,
+                                    );
+                                }
+                            },
+                            else => {},
+                        };
+                    },
+                    .keyword_for,
+                    .keyword_while,
+                    .keyword_switch,
+                    => |tag| {
+                        const maybe_label = if (tree.isTokenPrecededByTags(kw_token, &.{ .identifier, .colon }))
+                            offsets.identifierTokenToNameSlice(tree, kw_token - 2)
+                            else
+                                null;
+
+                            if (tag == .keyword_switch and maybe_label == null) return .empty;
+
+                            const nodes = try ast.nodesOverlappingIndex(allocator, tree, tree.tokenStart(kw_token));
+                            defer allocator.free(nodes);
+
+                            var walker: ast.Walker = try .init(allocator, tree, nodes[0]);
+                            defer walker.deinit(allocator);
+
+                            _ = try walker.nextIgnoreClose(allocator, tree);
+
+                            var loop_depth: usize = 1;
+
+                            while (try walker.next(allocator, tree)) |event| {
+                                switch (event) {
+                                    .open => |node| switch (tree.nodeTag(node)) {
+                                        .@"break", .@"continue" => {
+                                            const label_token = tree.nodeData(node).opt_token_and_opt_node[0].unwrap();
+                                            if (label_token) |actual_label_token| {
+                                                const actual_label = offsets.identifierTokenToNameSlice(tree, actual_label_token);
+                                                if (maybe_label) |expected_label| {
+                                                    if (!std.mem.eql(u8, expected_label, actual_label)) continue;
+                                                }
+                                            } else if (loop_depth > 1) continue;
+                                            try results.append(allocator, tree.nodeMainToken(node));
+                                        },
+
+                                        .@"while",
+                                        .while_simple,
+                                        .while_cont,
+                                        .@"for",
+                                        .for_simple,
+                                        => {
+                                            if (maybe_label == null) {
+                                                walker.skip();
+                                            } else {
+                                                loop_depth += 1;
+                                            }
+                                        },
+                                        else => {},
+                                    },
+                                    .close => |node| switch (tree.nodeTag(node)) {
+                                        .@"while",
+                                        .while_simple,
+                                        .while_cont,
+                                        .@"for",
+                                        .for_simple,
+                                        => {
+                                            if (maybe_label != null) {
+                                                loop_depth -= 1;
+                                            }
+                                        },
+                                        else => {},
+                                    },
+                                }
+                            }
+                        },
+                        else => return .empty,
+        }
+
+        var locations: std.ArrayList(types.Location) = try .initCapacity(allocator, results.items.len + @intFromBool(include_decl));
+        errdefer locations.deinit(allocator);
+
+        if (include_decl) {
+            locations.appendAssumeCapacity(.{
+                .uri = handle.uri.raw,
+                .range = offsets.tokenToRange(tree, kw_token, encoding),
+            });
+        }
+
+        for (results.items) |token| {
+            locations.appendAssumeCapacity(.{
+                .uri = handle.uri.raw,
+                .range = offsets.tokenToRange(tree, token, encoding),
+            });
+        }
+        return locations;
+    }
+
+    const CallBuilder = struct {
+        callsites: std.ArrayList(Analyser.NodeWithHandle) = .empty,
+        /// this is the declaration we are searching for
+        target_decl: Analyser.DeclWithHandle,
+        analyser: *Analyser,
+
+        fn add(self: *CallBuilder, handle: *DocumentStore.Handle, call_node: Ast.Node.Index) error{OutOfMemory}!void {
+            try self.callsites.append(self.analyser.arena, .{
+                .handle = handle,
+                .node = call_node,
+            });
+        }
+
+        fn collectReferences(self: *CallBuilder, handle: *DocumentStore.Handle, node: Ast.Node.Index) Analyser.Error!void {
+            const tracy_zone = tracy.trace(@src());
+            defer tracy_zone.end();
+
+            const arena = self.analyser.arena;
+            var walker: ast.Walker = try .init(arena, &handle.tree, node);
+            defer walker.deinit(arena);
+            while (try walker.nextIgnoreClose(arena, &handle.tree)) |child| {
+                try referenceNode(self, handle, child);
+            }
+        }
+
+        fn referenceNode(
+            builder: *CallBuilder,
+            handle: *DocumentStore.Handle,
+            node: Ast.Node.Index,
+        ) Analyser.Error!void {
+            const tree = &handle.tree;
+            switch (tree.nodeTag(node)) {
+                .call,
+                .call_comma,
+                .call_one,
+                .call_one_comma,
+                => {
+                    var buf: [1]Ast.Node.Index = undefined;
+                    const call = tree.fullCall(&buf, node).?;
+
+                    const called_node = call.ast.fn_expr;
+
+                    switch (tree.nodeTag(called_node)) {
+                        .identifier => {
+                            const identifier_token = ast.identifierTokenFromIdentifierNode(tree, called_node) orelse return;
+
+                            const child = (try builder.analyser.lookupSymbolGlobal(
+                                    handle,
+                                    offsets.identifierTokenToNameSlice(tree, identifier_token),
+                                    tree.tokenStart(identifier_token),
+                            )) orelse return;
+
+                            if (builder.target_decl.eql(child)) {
+                                try builder.add(handle, node);
+                            }
+                        },
+                        .field_access => {
+                            const lhs_node, const field_name = tree.nodeData(called_node).node_and_token;
+                            const lhs = (try builder.analyser.resolveTypeOfNode(.of(lhs_node, handle))) orelse return;
+                            const deref_lhs = try builder.analyser.resolveDerefType(lhs) orelse lhs;
+
+                            const symbol = offsets.tokenToSlice(tree, field_name);
+                            const child = (try deref_lhs.lookupSymbol(builder.analyser, symbol)) orelse return;
+
+                            if (builder.target_decl.eql(child)) {
+                                try builder.add(handle, node);
                             }
                         },
                         else => {},
-                    };
+                    }
                 },
-                .keyword_for,
-                .keyword_while,
-                .keyword_switch,
-                => |tag| {
-                    const maybe_label = if (tree.isTokenPrecededByTags(kw_token, &.{ .identifier, .colon }))
-                        offsets.identifierTokenToNameSlice(tree, kw_token - 2)
-                        else
-                            null;
+                else => {},
+            }
+        }
+    };
 
-                        if (tag == .keyword_switch and maybe_label == null) return .empty;
-
-                        const nodes = try ast.nodesOverlappingIndex(allocator, tree, tree.tokenStart(kw_token));
-                        defer allocator.free(nodes);
-
-                        var walker: ast.Walker = try .init(allocator, tree, nodes[0]);
-                        defer walker.deinit(allocator);
-
-                        _ = try walker.nextIgnoreClose(allocator, tree);
-
-                        var loop_depth: usize = 1;
-
-                        while (try walker.next(allocator, tree)) |event| {
-                            switch (event) {
-                                .open => |node| switch (tree.nodeTag(node)) {
-                                    .@"break", .@"continue" => {
-                                        const label_token = tree.nodeData(node).opt_token_and_opt_node[0].unwrap();
-                                        if (label_token) |actual_label_token| {
-                                            const actual_label = offsets.identifierTokenToNameSlice(tree, actual_label_token);
-                                            if (maybe_label) |expected_label| {
-                                                if (!std.mem.eql(u8, expected_label, actual_label)) continue;
-                                            }
-                                        } else if (loop_depth > 1) continue;
-                                        try results.append(allocator, tree.nodeMainToken(node));
-                                    },
-
-                                    .@"while",
-                                    .while_simple,
-                                    .while_cont,
-                                    .@"for",
-                                    .for_simple,
-                                    => {
-                                        if (maybe_label == null) {
-                                            walker.skip();
-                                        } else {
-                                            loop_depth += 1;
-                                        }
-                                    },
-                                    else => {},
-                                },
-                                .close => |node| switch (tree.nodeTag(node)) {
-                                    .@"while",
-                                    .while_simple,
-                                    .while_cont,
-                                    .@"for",
-                                    .for_simple,
-                                    => {
-                                        if (maybe_label != null) {
-                                            loop_depth -= 1;
-                                        }
-                                    },
-                                    else => {},
-                                },
-                            }
-                        }
-                    },
-                    else => return .empty,
-    }
-
-    var locations: std.ArrayList(types.Location) = try .initCapacity(allocator, results.items.len + @intFromBool(include_decl));
-    errdefer locations.deinit(allocator);
-
-    if (include_decl) {
-        locations.appendAssumeCapacity(.{
-            .uri = handle.uri.raw,
-            .range = offsets.tokenToRange(tree, kw_token, encoding),
-        });
-    }
-
-    for (results.items) |token| {
-        locations.appendAssumeCapacity(.{
-            .uri = handle.uri.raw,
-            .range = offsets.tokenToRange(tree, token, encoding),
-        });
-    }
-    return locations;
-}
-
-const CallBuilder = struct {
-    callsites: std.ArrayList(Analyser.NodeWithHandle) = .empty,
-    /// this is the declaration we are searching for
-    target_decl: Analyser.DeclWithHandle,
-    analyser: *Analyser,
-
-    fn add(self: *CallBuilder, handle: *DocumentStore.Handle, call_node: Ast.Node.Index) error{OutOfMemory}!void {
-        try self.callsites.append(self.analyser.arena, .{
-            .handle = handle,
-            .node = call_node,
-        });
-    }
-
-    fn collectReferences(self: *CallBuilder, handle: *DocumentStore.Handle, node: Ast.Node.Index) Analyser.Error!void {
+    pub fn callsiteReferences(
+        analyser: *Analyser,
+        decl_handle: Analyser.DeclWithHandle,
+        /// search other files for references
+        workspace: bool,
+    ) Analyser.Error!std.ArrayList(Analyser.NodeWithHandle) {
         const tracy_zone = tracy.trace(@src());
         defer tracy_zone.end();
 
-        const arena = self.analyser.arena;
-        var walker: ast.Walker = try .init(arena, &handle.tree, node);
-        defer walker.deinit(arena);
-        while (try walker.nextIgnoreClose(arena, &handle.tree)) |child| {
-            try referenceNode(self, handle, child);
-        }
-    }
+        std.debug.assert(decl_handle.decl == .ast_node);
 
-    fn referenceNode(
-        builder: *CallBuilder,
-        handle: *DocumentStore.Handle,
-        node: Ast.Node.Index,
-    ) Analyser.Error!void {
-        const tree = &handle.tree;
-        switch (tree.nodeTag(node)) {
-            .call,
-            .call_comma,
-            .call_one,
-            .call_one_comma,
-            => {
-                var buf: [1]Ast.Node.Index = undefined;
-                const call = tree.fullCall(&buf, node).?;
-
-                const called_node = call.ast.fn_expr;
-
-                switch (tree.nodeTag(called_node)) {
-                    .identifier => {
-                        const identifier_token = ast.identifierTokenFromIdentifierNode(tree, called_node) orelse return;
-
-                        const child = (try builder.analyser.lookupSymbolGlobal(
-                                handle,
-                                offsets.identifierTokenToNameSlice(tree, identifier_token),
-                                tree.tokenStart(identifier_token),
-                        )) orelse return;
-
-                        if (builder.target_decl.eql(child)) {
-                            try builder.add(handle, node);
-                        }
-                    },
-                    .field_access => {
-                        const lhs_node, const field_name = tree.nodeData(called_node).node_and_token;
-                        const lhs = (try builder.analyser.resolveTypeOfNode(.of(lhs_node, handle))) orelse return;
-                        const deref_lhs = try builder.analyser.resolveDerefType(lhs) orelse lhs;
-
-                        const symbol = offsets.tokenToSlice(tree, field_name);
-                        const child = (try deref_lhs.lookupSymbol(builder.analyser, symbol)) orelse return;
-
-                        if (builder.target_decl.eql(child)) {
-                            try builder.add(handle, node);
-                        }
-                    },
-                    else => {},
-                }
-            },
-            else => {},
-        }
-    }
-};
-
-pub fn callsiteReferences(
-    analyser: *Analyser,
-    decl_handle: Analyser.DeclWithHandle,
-    /// search other files for references
-    workspace: bool,
-) Analyser.Error!std.ArrayList(Analyser.NodeWithHandle) {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
-    std.debug.assert(decl_handle.decl == .ast_node);
-
-    var builder: CallBuilder = .{
-        .analyser = analyser,
-        .target_decl = decl_handle,
-    };
-
-    try builder.collectReferences(decl_handle.handle, .root);
-
-    if (workspace) {
-        var uris = try gatherWorkspaceReferenceCandidates(
-            analyser.store,
-            analyser.arena,
-            decl_handle.handle,
-            decl_handle.handle,
-        );
-        for (uris.keys()) |uri| {
-            if (uri.eql(decl_handle.handle.uri)) continue;
-            const dependency_handle = analyser.store.getHandle(uri) orelse continue;
-            try builder.collectReferences(dependency_handle, .root);
-        }
-    }
-
-    return builder.callsites;
-}
-
-pub const GeneralReferencesRequest = union(enum) {
-    rename: types.rename.Params,
-    references: types.reference.Params,
-    highlight: types.DocumentHighlight.Params,
-
-    fn uri(self: @This()) []const u8 {
-        return switch (self) {
-            .rename => |rename| rename.textDocument.uri,
-            .references => |ref| ref.textDocument.uri,
-            .highlight => |highlight| highlight.textDocument.uri,
+        var builder: CallBuilder = .{
+            .analyser = analyser,
+            .target_decl = decl_handle,
         };
-    }
 
-    fn position(self: @This()) types.Position {
-        return switch (self) {
-            .rename => |rename| rename.position,
-            .references => |ref| ref.position,
-            .highlight => |highlight| highlight.position,
-        };
-    }
-};
+        try builder.collectReferences(decl_handle.handle, .root);
 
-pub const GeneralReferencesResponse = union {
-    rename: types.WorkspaceEdit,
-    references: []types.Location,
-    highlight: []types.DocumentHighlight,
-};
-
-pub fn referencesHandler(server: *Server, arena: std.mem.Allocator, request: GeneralReferencesRequest) Server.Error!?GeneralReferencesResponse {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
-    const uri = Uri.parse(arena, request.uri()) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidParams,
-    };
-    const handle = server.document_store.getHandle(uri) orelse return null;
-    if (handle.tree.mode == .zon) return null;
-
-    const source_index = offsets.positionToIndex(handle.tree.source, request.position(), server.offset_encoding);
-    const pos_context = try Analyser.getPositionContext(server.allocator, &handle.tree, source_index, true);
-
-    var analyser = server.initAnalyser(arena, handle);
-    defer analyser.deinit();
-
-    const include_decl = switch (request) {
-        .references => |ref| ref.context.includeDeclaration,
-        else => true,
-    };
-
-    // TODO: Make this work with branching types
-    const locations = locs: {
-        if (pos_context == .keyword and request != .rename) {
-            break :locs try controlFlowReferences(
-                       arena,
-                       .{ .token = offsets.sourceIndexToTokenIndex(&handle.tree, source_index).preferLeft(), .handle = handle },
-                       server.offset_encoding,
-                       include_decl,
-                   );
+        if (workspace) {
+            var uris = try gatherWorkspaceReferenceCandidates(
+                analyser.store,
+                analyser.arena,
+                decl_handle.handle,
+                decl_handle.handle,
+            );
+            for (uris.keys()) |uri| {
+                if (uri.eql(decl_handle.handle.uri)) continue;
+                const dependency_handle = analyser.store.getHandle(uri) orelse continue;
+                try builder.collectReferences(dependency_handle, .root);
+            }
         }
 
-        const name_loc = offsets.identifierLocFromIndex(&handle.tree, source_index) orelse return null;
-        const name = offsets.locToSlice(handle.tree.source, name_loc);
+        return builder.callsites;
+    }
 
-        const target_decl = switch (pos_context) {
-            .var_access, .test_doctest_name => try analyser.lookupSymbolGlobal(handle, name, source_index),
-            .field_access => |loc| z: {
-                const held_loc = offsets.locMerge(loc, name_loc);
-                const a = try analyser.getSymbolFieldAccesses(arena, handle, source_index, held_loc, name);
-                if (a) |b| {
-                    if (b.len != 0) break :z b[0];
+    pub const GeneralReferencesRequest = union(enum) {
+        rename: types.rename.Params,
+        references: types.reference.Params,
+        highlight: types.DocumentHighlight.Params,
+
+        fn uri(self: @This()) []const u8 {
+            return switch (self) {
+                .rename => |rename| rename.textDocument.uri,
+                .references => |ref| ref.textDocument.uri,
+                .highlight => |highlight| highlight.textDocument.uri,
+            };
+        }
+
+        fn position(self: @This()) types.Position {
+            return switch (self) {
+                .rename => |rename| rename.position,
+                .references => |ref| ref.position,
+                .highlight => |highlight| highlight.position,
+            };
+        }
+    };
+
+    pub const GeneralReferencesResponse = union {
+        rename: types.WorkspaceEdit,
+        references: []types.Location,
+        highlight: []types.DocumentHighlight,
+    };
+
+    pub fn referencesHandler(server: *Server, arena: std.mem.Allocator, request: GeneralReferencesRequest) Server.Error!?GeneralReferencesResponse {
+        const tracy_zone = tracy.trace(@src());
+        defer tracy_zone.end();
+
+        const uri = Uri.parse(arena, request.uri()) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidParams,
+        };
+        const handle = server.document_store.getHandle(uri) orelse return null;
+        if (handle.tree.mode == .zon) return null;
+
+        const source_index = offsets.positionToIndex(handle.tree.source, request.position(), server.offset_encoding);
+        const pos_context = try Analyser.getPositionContext(server.allocator, &handle.tree, source_index, true);
+
+        var analyser = server.initAnalyser(arena, handle);
+        defer analyser.deinit();
+
+        const include_decl = switch (request) {
+            .references => |ref| ref.context.includeDeclaration,
+            else => true,
+        };
+
+        // TODO: Make this work with branching types
+        const locations = locs: {
+            if (pos_context == .keyword and request != .rename) {
+                break :locs try controlFlowReferences(
+                           arena,
+                           .{ .token = offsets.sourceIndexToTokenIndex(&handle.tree, source_index).preferLeft(), .handle = handle },
+                           server.offset_encoding,
+                           include_decl,
+                       );
+            }
+
+            const name_loc = offsets.identifierLocFromIndex(&handle.tree, source_index) orelse return null;
+            const name = offsets.locToSlice(handle.tree.source, name_loc);
+
+            const target_decl = switch (pos_context) {
+                .var_access, .test_doctest_name => try analyser.lookupSymbolGlobal(handle, name, source_index),
+                .field_access => |loc| z: {
+                    const held_loc = offsets.locMerge(loc, name_loc);
+                    const a = try analyser.getSymbolFieldAccesses(arena, handle, source_index, held_loc, name);
+                    if (a) |b| {
+                        if (b.len != 0) break :z b[0];
+                    }
+
+                    break :z null;
+                },
+                .label_access, .label_decl => try Analyser.lookupLabel(handle, name, source_index),
+                .enum_literal => try analyser.getSymbolEnumLiteral(handle, source_index, name),
+                .keyword => null,
+                else => null,
+                } orelse return null;
+
+
+
+            // pub const id_3 = 1;
+            //
+            // const stable = @import("cells_stable.zig");
+            // pub const example_cell22 = stable.id_3;
+            //
+            // const cell22_reference = example_cell22;
+            //
+            // if the resolve is made, then renaming the example_cell22 will rename id_2 instead.
+            // it is wrong
+            // also when looking for references of example_cell22, it does not show cell22_reference,
+            // it locks into references of stable.id_3, which there is only one.
+            // this function needs to go away.
+
+            // target_decl = try analyser.resolveVarDeclAlias(target_decl) orelse target_decl;
+
+            // std.debug.print("check target decl: {any}", .{ target_decl });
+
+            break :locs switch (target_decl.decl) {
+                .label => |payload| try labelReferences(
+                    arena,
+                    target_decl.handle,
+                    payload,
+                    server.offset_encoding,
+                    include_decl,
+                ),
+                else => try symbolReferences(
+                    &analyser,
+                    request,
+                    target_decl,
+                    server.offset_encoding,
+                    include_decl,
+                    handle,
+                ),
+            };
+        };
+
+        switch (request) {
+            .rename => |rename| {
+                const escaped_rename = try std.fmt.allocPrint(arena, "{f}", .{std.zig.fmtId(rename.newName)});
+                var changes: std.array_hash_map.String(std.ArrayList(types.TextEdit)) = .empty;
+
+                for (locations.items) |loc| {
+                    const gop = try changes.getOrPutValue(arena, loc.uri, .empty);
+                    try gop.value_ptr.append(arena, .{
+                        .range = loc.range,
+                        .newText = escaped_rename,
+                    });
                 }
 
-                break :z null;
+                var new_changes: lsp.parser.Map(types.DocumentUri, []const types.TextEdit) = .{};
+                try new_changes.map.ensureTotalCapacity(arena, changes.count());
+
+                var changes_it = changes.iterator();
+                while (changes_it.next()) |entry| {
+                    new_changes.map.putAssumeCapacityNoClobber(entry.key_ptr.*, try entry.value_ptr.toOwnedSlice(arena));
+                }
+
+                return .{ .rename = .{ .changes = new_changes } };
             },
-            .label_access, .label_decl => try Analyser.lookupLabel(handle, name, source_index),
-            .enum_literal => try analyser.getSymbolEnumLiteral(handle, source_index, name),
-            .keyword => null,
-            else => null,
-            } orelse return null;
-
-
-
-        // pub const id_3 = 1;
-        //
-        // const stable = @import("cells_stable.zig");
-        // pub const example_cell22 = stable.id_3;
-        //
-        // const cell22_reference = example_cell22;
-        //
-        // if the resolve is made, then renaming the example_cell22 will rename id_2 instead.
-        // it is wrong
-        // also when looking for references of example_cell22, it does not show cell22_reference,
-        // it locks into references of stable.id_3, which there is only one.
-        // this function needs to go away.
-
-        // target_decl = try analyser.resolveVarDeclAlias(target_decl) orelse target_decl;
-
-        // std.debug.print("check target decl: {any}", .{ target_decl });
-
-        break :locs switch (target_decl.decl) {
-            .label => |payload| try labelReferences(
-                arena,
-                target_decl.handle,
-                payload,
-                server.offset_encoding,
-                include_decl,
-            ),
-            else => try symbolReferences(
-                &analyser,
-                request,
-                target_decl,
-                server.offset_encoding,
-                include_decl,
-                handle,
-            ),
-        };
-    };
-
-    switch (request) {
-        .rename => |rename| {
-            const escaped_rename = try std.fmt.allocPrint(arena, "{f}", .{std.zig.fmtId(rename.newName)});
-            var changes: std.array_hash_map.String(std.ArrayList(types.TextEdit)) = .empty;
-
-            for (locations.items) |loc| {
-                const gop = try changes.getOrPutValue(arena, loc.uri, .empty);
-                try gop.value_ptr.append(arena, .{
-                    .range = loc.range,
-                    .newText = escaped_rename,
-                });
-            }
-
-            var new_changes: lsp.parser.Map(types.DocumentUri, []const types.TextEdit) = .{};
-            try new_changes.map.ensureTotalCapacity(arena, changes.count());
-
-            var changes_it = changes.iterator();
-            while (changes_it.next()) |entry| {
-                new_changes.map.putAssumeCapacityNoClobber(entry.key_ptr.*, try entry.value_ptr.toOwnedSlice(arena));
-            }
-
-            return .{ .rename = .{ .changes = new_changes } };
-        },
-        .references => return .{ .references = locations.items },
-        .highlight => {
-            var highlights: std.ArrayList(types.DocumentHighlight) = try .initCapacity(arena, locations.items.len);
-            for (locations.items) |loc| {
-                std.debug.assert(std.mem.eql(u8, handle.uri.raw, loc.uri));
-                highlights.appendAssumeCapacity(.{
-                    .range = loc.range,
-                    .kind = .Text,
-                });
-            }
-            return .{ .highlight = highlights.items };
-        },
+            .references => return .{ .references = locations.items },
+            .highlight => {
+                var highlights: std.ArrayList(types.DocumentHighlight) = try .initCapacity(arena, locations.items.len);
+                for (locations.items) |loc| {
+                    std.debug.assert(std.mem.eql(u8, handle.uri.raw, loc.uri));
+                    highlights.appendAssumeCapacity(.{
+                        .range = loc.range,
+                        .kind = .Text,
+                    });
+                }
+                return .{ .highlight = highlights.items };
+            },
+        }
     }
-}

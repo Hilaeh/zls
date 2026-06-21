@@ -30,7 +30,7 @@ const usage =
     \\  --enable-stderr-logs      Write log message to stderr
     \\  --disable-lsp-logs        Disable LSP 'window/logMessage' messages
     \\
-;
+        ;
 
 pub const std_options: std.Options = .{
     // Always set this to debug to make std.log call into our handler, then control the runtime
@@ -139,27 +139,27 @@ fn createLogFile(
 ) error{ Canceled, OutOfMemory }!?struct { std.Io.File, []const u8 } {
     const log_file_path = if (override_log_file_path) |log_file_path|
         try allocator.dupe(u8, log_file_path)
-    else
-        try defaultLogFilePath(io, allocator, environ_map) orelse return null;
-    errdefer allocator.free(log_file_path);
+        else
+            try defaultLogFilePath(io, allocator, environ_map) orelse return null;
+        errdefer allocator.free(log_file_path);
 
-    if (std.Io.Dir.path.dirname(log_file_path)) |dirname| {
-        std.Io.Dir.cwd().createDirPath(io, dirname) catch |err| switch (err) {
+        if (std.Io.Dir.path.dirname(log_file_path)) |dirname| {
+            std.Io.Dir.cwd().createDirPath(io, dirname) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => {},
+            };
+        }
+
+        const file = std.Io.Dir.cwd().createFile(io, log_file_path, .{ .truncate = false }) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
-            else => {},
+            else => {
+                allocator.free(log_file_path);
+                return null;
+            },
         };
-    }
+        errdefer file.close(io);
 
-    const file = std.Io.Dir.cwd().createFile(io, log_file_path, .{ .truncate = false }) catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        else => {
-            allocator.free(log_file_path);
-            return null;
-        },
-    };
-    errdefer file.close(io);
-
-    return .{ file, log_file_path };
+        return .{ file, log_file_path };
 }
 
 /// Output format of `zls env`
@@ -384,42 +384,42 @@ fn loadConfiguration(
     blk: {
         var config_result = if (maybe_config_path) |config_path|
             try loadConfigFromFile(io, allocator, config_path)
-        else
-            try loadConfigFromSystem(io, allocator, environ_map);
-        defer config_result.deinit(allocator);
+            else
+                try loadConfigFromSystem(io, allocator, environ_map);
+            defer config_result.deinit(allocator);
 
-        switch (config_result) {
-            .success => |*config_with_path| {
-                log.info("Loaded config:    {s}", .{config_with_path.path});
-                config = config_with_path.config;
-                config_arena.state = config_with_path.config_arena;
-                config_with_path.config_arena = .{};
-            },
-            .failure => |payload| {
-                const message = try payload.toMessage(allocator) orelse break :blk;
-                defer allocator.free(message);
-                server.showMessage(.Error, "Failed to load configuration options:\n{s}", .{message});
-            },
-            .not_found => {},
-        }
+            switch (config_result) {
+                .success => |*config_with_path| {
+                    log.info("Loaded config:    {s}", .{config_with_path.path});
+                    config = config_with_path.config;
+                    config_arena.state = config_with_path.config_arena;
+                    config_with_path.config_arena = .{};
+                },
+                .failure => |payload| {
+                    const message = try payload.toMessage(allocator) orelse break :blk;
+                    defer allocator.free(message);
+                    server.showMessage(.Error, "Failed to load configuration options:\n{s}", .{message});
+                },
+                .not_found => {},
+            }
     }
 
-    if (config.global_cache_path == null) blk: {
-        if (zig_builtin.target.os.tag == .wasi) {
-            // will default to `/cache`
-            break :blk;
-        }
+         if (config.global_cache_path == null) blk: {
+             if (zig_builtin.target.os.tag == .wasi) {
+                 // will default to `/cache`
+                 break :blk;
+             }
 
-        const cache_dir_path = try known_folders.getPath(io, allocator, environ_map, .cache) orelse {
-            server.showMessage(.Error, "Failed to resolve global cache directory", .{});
-            break :blk;
-        };
-        defer allocator.free(cache_dir_path);
+             const cache_dir_path = try known_folders.getPath(io, allocator, environ_map, .cache) orelse {
+                 server.showMessage(.Error, "Failed to resolve global cache directory", .{});
+                 break :blk;
+             };
+             defer allocator.free(cache_dir_path);
 
-        config.global_cache_path = try std.Io.Dir.path.join(config_arena.allocator(), &.{ cache_dir_path, "zls" });
-    }
+             config.global_cache_path = try std.Io.Dir.path.join(config_arena.allocator(), &.{ cache_dir_path, "zls" });
+         }
 
-    try server.config_manager.setConfiguration2(.frontend, &config);
+         try server.config_manager.setConfiguration2(.frontend, &config);
 }
 
 const ParseArgsResult = struct {
@@ -520,85 +520,85 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
     };
     const base_allocator = if (is_debug)
         debug_allocator.allocator()
-    else if (zig_builtin.link_libc)
-        std.heap.c_allocator
-    else if (zig_builtin.target.os.tag == .wasi)
-        std.heap.wasm_allocator
-    else
-        std.heap.smp_allocator;
-    defer if (is_debug) {
-        _ = debug_allocator.deinit();
-    };
+        else if (zig_builtin.link_libc)
+            std.heap.c_allocator
+                else if (zig_builtin.target.os.tag == .wasi)
+                    std.heap.wasm_allocator
+                        else
+                            std.heap.smp_allocator;
+                        defer if (is_debug) {
+                            _ = debug_allocator.deinit();
+                        };
 
-    var tracy_state = if (tracy.enable_allocation) tracy.tracyAllocator(base_allocator) else {};
-    const inner_allocator: std.mem.Allocator = if (tracy.enable_allocation) tracy_state.allocator() else base_allocator;
+                        var tracy_state = if (tracy.enable_allocation) tracy.tracyAllocator(base_allocator) else {};
+                        const inner_allocator: std.mem.Allocator = if (tracy.enable_allocation) tracy_state.allocator() else base_allocator;
 
-    var failing_allocator_state = if (exe_options.enable_failing_allocator) zls.testing.FailingAllocator.init(inner_allocator, exe_options.enable_failing_allocator_likelihood) else {};
-    const allocator: std.mem.Allocator = if (exe_options.enable_failing_allocator) failing_allocator_state.allocator() else inner_allocator;
+                        var failing_allocator_state = if (exe_options.enable_failing_allocator) zls.testing.FailingAllocator.init(inner_allocator, exe_options.enable_failing_allocator_likelihood) else {};
+                        const allocator: std.mem.Allocator = if (exe_options.enable_failing_allocator) failing_allocator_state.allocator() else inner_allocator;
 
-    var threaded: std.Io.Threaded = .init(allocator, .{
-        .environ = init.environ,
-        .argv0 = .init(init.args),
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+                        var threaded: std.Io.Threaded = .init(allocator, .{
+                            .environ = init.environ,
+                            .argv0 = .init(init.args),
+                        });
+                        defer threaded.deinit();
+                        const io = threaded.io();
 
-    var environ_map = try init.environ.createMap(allocator);
-    defer environ_map.deinit();
+                        var environ_map = try init.environ.createMap(allocator);
+                        defer environ_map.deinit();
 
-    const result = try parseArgs(io, allocator, &environ_map, init.args);
-    defer result.deinit(allocator);
+                        const result = try parseArgs(io, allocator, &environ_map, init.args);
+                        defer result.deinit(allocator);
 
-    log_file, const log_file_path = try createLogFile(io, allocator, &environ_map, result.log_file_path) orelse .{ null, null };
-    defer if (log_file_path) |path| allocator.free(path);
-    defer if (log_file) |file| {
-        file.close(io);
-        log_file = null;
-    };
+                        log_file, const log_file_path = try createLogFile(io, allocator, &environ_map, result.log_file_path) orelse .{ null, null };
+                        defer if (log_file_path) |path| allocator.free(path);
+                        defer if (log_file) |file| {
+                            file.close(io);
+                            log_file = null;
+                        };
 
-    var read_buffer: [256]u8 = undefined;
-    var stdio_transport: zls.lsp.Transport.Stdio = .init(&read_buffer, .stdin(), .stdout());
+                        var read_buffer: [256]u8 = undefined;
+                        var stdio_transport: zls.lsp.Transport.Stdio = .init(&read_buffer, .stdin(), .stdout());
 
-    var thread_safe_transport: zls.lsp.ThreadSafeTransport(.{
-        .thread_safe_read = false,
-        .thread_safe_write = true,
-    }) = .init(&stdio_transport.transport);
+                        var thread_safe_transport: zls.lsp.ThreadSafeTransport(.{
+                            .thread_safe_read = false,
+                            .thread_safe_write = true,
+                        }) = .init(&stdio_transport.transport);
 
-    const transport: *zls.lsp.Transport = &thread_safe_transport.transport;
+                        const transport: *zls.lsp.Transport = &thread_safe_transport.transport;
 
-    log_transport = if (result.disable_lsp_logs) null else transport;
-    log_stderr = result.enable_stderr_logs;
-    log_level = result.log_level orelse log_level;
-    defer {
-        log_transport = null;
-        log_stderr = true;
-    }
+                        log_transport = if (result.disable_lsp_logs) null else transport;
+                        log_stderr = result.enable_stderr_logs;
+                        log_level = result.log_level orelse log_level;
+                        defer {
+                            log_transport = null;
+                            log_stderr = true;
+                        }
 
-    log.info("Starting ZLS      {s} @ '{s}'", .{ zls.build_options.version_string, result.zls_exe_path });
-    if (log_file_path) |path| {
-        log.info("Log File:         {s} ({t})", .{ path, log_level });
-    } else {
-        log.info("Log File:         none", .{});
-    }
+                        log.info("Starting ZLS      {s} @ '{s}'", .{ zls.build_options.version_string, result.zls_exe_path });
+                        if (log_file_path) |path| {
+                            log.info("Log File:         {s} ({t})", .{ path, log_level });
+                        } else {
+                            log.info("Log File:         none", .{});
+                        }
 
-    var config_manager: zls.configuration.Manager = try .init(io, allocator, &environ_map);
-    defer config_manager.deinit();
+                        var config_manager: zls.configuration.Manager = try .init(io, allocator, &environ_map);
+                        defer config_manager.deinit();
 
-    const server: *zls.Server = try .create(.{
-        .io = io,
-        .allocator = allocator,
-        .transport = transport,
-        .config_manager = &config_manager,
-    });
-    defer server.destroy();
+                        const server: *zls.Server = try .create(.{
+                            .io = io,
+                            .allocator = allocator,
+                            .transport = transport,
+                            .config_manager = &config_manager,
+                        });
+                        defer server.destroy();
 
-    try loadConfiguration(io, allocator, environ_map, server, result.config_path);
+                        try loadConfiguration(io, allocator, environ_map, server, result.config_path);
 
-    try server.loop();
+                        try server.loop();
 
-    switch (server.status) {
-        .exiting_failure => return 1,
-        .exiting_success => return 0,
-        else => unreachable,
-    }
+                        switch (server.status) {
+                            .exiting_failure => return 1,
+                            .exiting_success => return 0,
+                            else => unreachable,
+                        }
 }
