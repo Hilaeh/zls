@@ -147,15 +147,15 @@ pub fn main(init: process.Init.Minimal) !void {
         } else if (mem.startsWith(u8, arg, "-D")) {
             const option_contents = arg[2..];
             if (option_contents.len == 0)
-                fatalWithHint("expected option name after '-D'", .{});
+            fatalWithHint("expected option name after '-D'", .{});
             if (mem.findScalar(u8, option_contents, '=')) |name_end| {
                 const option_name = option_contents[0..name_end];
                 const option_value = option_contents[name_end + 1 ..];
                 if (try builder.addUserInputOption(option_name, option_value))
-                    fatal("  access the help menu with 'zig build -h'", .{});
+                fatal("  access the help menu with 'zig build -h'", .{});
             } else {
                 if (try builder.addUserInputFlag(option_contents))
-                    fatal("  access the help menu with 'zig build -h'", .{});
+                fatal("  access the help menu with 'zig build -h'", .{});
             }
         } else if (mem.startsWith(u8, arg, "-")) {
             if (mem.eql(u8, arg, "--verbose")) {
@@ -209,23 +209,23 @@ pub fn main(init: process.Init.Minimal) !void {
                 builder.libc_file = nextArgOrFatal(args, &arg_idx);
             } else if (mem.eql(u8, arg, "--color")) {
                 const next_arg = nextArg(args, &arg_idx) orelse
-                    fatalWithHint("expected [auto|on|off] after '{s}'", .{arg});
+                fatalWithHint("expected [auto|on|off] after '{s}'", .{arg});
                 _ = next_arg;
             } else if (mem.eql(u8, arg, "--error-style")) {
                 const next_arg = nextArg(args, &arg_idx) orelse
-                    fatalWithHint("expected style after '{s}'", .{arg});
+                fatalWithHint("expected style after '{s}'", .{arg});
                 _ = next_arg;
             } else if (mem.eql(u8, arg, "--multiline-errors")) {
                 const next_arg = nextArg(args, &arg_idx) orelse
-                    fatalWithHint("expected style after '{s}'", .{arg});
+                fatalWithHint("expected style after '{s}'", .{arg});
                 _ = next_arg;
             } else if (mem.eql(u8, arg, "--summary")) {
                 const next_arg = nextArg(args, &arg_idx) orelse
-                    fatalWithHint("expected [all|new|failures|line|none] after '{s}'", .{arg});
+                fatalWithHint("expected [all|new|failures|line|none] after '{s}'", .{arg});
                 _ = next_arg;
             } else if (mem.eql(u8, arg, "--seed")) {
                 const next_arg = nextArg(args, &arg_idx) orelse
-                    fatalWithHint("expected u32 after '{s}'", .{arg});
+                fatalWithHint("expected u32 after '{s}'", .{arg});
                 graph.random_seed = std.fmt.parseUnsigned(u32, next_arg, 0) catch |err| {
                     fatal("unable to parse seed '{s}' as unsigned 32-bit integer: {s}\n", .{
                         next_arg, @errorName(err),
@@ -242,7 +242,7 @@ pub fn main(init: process.Init.Minimal) !void {
                 };
             } else if (mem.eql(u8, arg, "--debounce")) {
                 const next_arg = nextArg(args, &arg_idx) orelse
-                    fatalWithHint("expected u16 after '{s}'", .{arg});
+                fatalWithHint("expected u16 after '{s}'", .{arg});
                 debounce_interval_ms = std.fmt.parseUnsigned(u16, next_arg, 0) catch |err| {
                     fatal("unable to parse debounce interval '{s}' as unsigned 16-bit integer: {t}\n", .{
                         next_arg, err,
@@ -258,8 +258,8 @@ pub fn main(init: process.Init.Minimal) !void {
                 builder.debug_pkg_config = true;
             } else if (mem.cutPrefix(u8, arg, "--debug-rt=")) |rest| {
                 graph.debug_compiler_runtime_libs =
-                    std.meta.stringToEnum(std.builtin.OptimizeMode, rest) orelse
-                    fatal("unrecognized optimization mode: '{s}'", .{rest});
+                std.meta.stringToEnum(std.builtin.OptimizeMode, rest) orelse
+                fatal("unrecognized optimization mode: '{s}'", .{rest});
             } else if (mem.eql(u8, arg, "--debug-compile-errors")) {
                 builder.debug_compile_errors = true;
             } else if (mem.eql(u8, arg, "--debug-incremental")) {
@@ -336,7 +336,7 @@ pub fn main(init: process.Init.Minimal) !void {
                 builder.reference_trace = null;
             } else if (mem.cutPrefix(u8, arg, "-j")) |text| {
                 const n = std.fmt.parseUnsigned(u32, text, 10) catch |err|
-                    fatal("unable to parse jobs count '{s}': {t}", .{ text, err });
+                fatal("unable to parse jobs count '{s}': {t}", .{ text, err });
                 if (n < 1) fatal("number of jobs must be at least 1", .{});
                 threaded.setAsyncLimit(.limited(n));
             } else if (mem.eql(u8, arg, "--")) {
@@ -356,7 +356,7 @@ pub fn main(init: process.Init.Minimal) !void {
     defer main_progress_node.end();
 
     builder.resolveInstallPrefix(install_prefix, dir_list);
-    {
+{
         var prog_node = main_progress_node.start("Configure", 0);
         defer prog_node.end();
         try builder.runBuild(root);
@@ -533,7 +533,7 @@ const Watch = struct {
                 .none => .none,
                 .duration => |d| .{ .ms = @intCast(d.raw.toMilliseconds()) },
                 .deadline => unreachable,
-                });
+            });
         }
         w.manual_event.waitTimeout(w.io, timeout) catch |err| switch (err) {
             error.Canceled => unreachable,
@@ -615,7 +615,7 @@ fn prepare(
     }
     const step_stack = unpopulated_step_stack;
 
-    {
+{
         // Check that we have enough memory to complete the build.
         var any_problems = false;
         for (step_stack.keys()) |s| {
@@ -746,7 +746,7 @@ fn makeStep(
     const io = b.graph.io;
     const gpa = run.gpa;
 
-    {
+{
         const step_prog_node = root_prog_node.start(s.name, 0);
         defer step_prog_node.end();
 
@@ -764,17 +764,17 @@ fn makeStep(
                 .success, .skipped => {},
             }
         } else if (s.make(.{
-            .progress_node = step_prog_node,
-            .watch = run.watch,
-            .web_server = null,
-            .unit_test_timeout_ns = null,
-            .gpa = gpa,
-        })) state: {
-            break :state .success;
-        } else |err| switch (err) {
-            error.MakeFailed => .failure,
-            error.MakeSkipped => .skipped,
-        };
+                .progress_node = step_prog_node,
+                .watch = run.watch,
+                .web_server = null,
+                .unit_test_timeout_ns = null,
+                .gpa = gpa,
+            })) state: {
+                    break :state .success;
+                } else |err| switch (err) {
+                    error.MakeFailed => .failure,
+                    error.MakeSkipped => .skipped,
+                };
 
         @atomicStore(Step.State, &s.state, new_state, .monotonic);
 
@@ -810,7 +810,7 @@ fn makeStep(
 
         // Release our RSS claim and kick off some blocked steps if possible. We use `dispatch_set`
         // as a staging buffer to avoid recursing into `makeStep` while `run.max_rss_mutex` is held.
-        {
+    {
             try run.max_rss_mutex.lock(io);
             defer run.max_rss_mutex.unlock(io);
             run.available_rss += s.max_rss;
@@ -1065,14 +1065,14 @@ fn extractBuildInformation(
                             try include_dirs.put(
                                 allocator,
                                 std.Io.Dir.path.dirname(header.getPath()).?,
-                                {},
+                            {},
                             );
                         }
                         if (other.installed_headers_include_tree) |include_tree| {
                             try include_dirs.put(
                                 allocator,
                                 include_tree.generated_directory.getPath(),
-                                {},
+                            {},
                             );
                         }
                     },
@@ -1083,7 +1083,7 @@ fn extractBuildInformation(
                         try include_dirs.put(
                             allocator,
                             config_header.generated_dir.getPath(),
-                            {},
+                        {},
                         );
                     },
                 }
@@ -1105,7 +1105,10 @@ fn extractBuildInformation(
                 const gop_import = try gop.value_ptr.import_table.map.getOrPut(allocator, name);
                 // This does not account for the possibility of collisions (i.e. modules with same root source file import different modules under the same name).
                 if (!gop_import.found_existing) {
-                    gop_import.value_ptr.* = try std.Io.Dir.path.resolve(allocator, &.{ cwd, import_root_source_file.getPath2(import.owner, null) });
+                    gop_import.value_ptr.* = shared.BuildConfig.ImportInfo{
+                        .path = try std.Io.Dir.path.resolve(allocator, &.{ cwd, import_root_source_file.getPath2(import.owner, null) }),
+                        .is_dependency = import.owner.pkg_hash.len != 0,
+                    };
                 }
             }
             gop.value_ptr.c_macros = try std.mem.concat(allocator, []const u8, &.{ gop.value_ptr.c_macros, c_macros.keys() });
@@ -1119,7 +1122,7 @@ fn extractBuildInformation(
     defer all_steps.deinit(gpa);
 
     // collect all steps that are decendants of the "install" step.
-    {
+{
         try all_steps.putNoClobber(gpa, b.getInstallStep(), true);
 
         var i: usize = 0;
@@ -1134,7 +1137,7 @@ fn extractBuildInformation(
     }
 
     // collect all other steps
-    {
+{
         var i: usize = all_steps.count();
 
         try all_steps.ensureUnusedCapacity(gpa, b.top_level_steps.count());
@@ -1153,7 +1156,7 @@ fn extractBuildInformation(
     }
 
     // Collect all steps that need to be run so that we can resolve the lazy paths we are interested in (e.g. root_source_file).
-    {
+{
         var needed_steps: std.array_hash_map.Auto(*Step, void) = .empty;
         defer needed_steps.deinit(gpa);
 
@@ -1249,10 +1252,11 @@ fn extractBuildInformation(
                 const package_info = @field(dependencies.packages, package.name);
                 if (!@hasDecl(package_info, "build_root")) break :blk;
                 if (!@hasDecl(package_info, "build_zig")) break :blk;
+
                 try root_dependencies.put(
                     arena,
                     root_dep[0],
-                    try std.Io.Dir.path.join(arena, &.{ package_info.build_root, "build.zig" }),
+                    try std.Io.Dir.path.resolve(arena, &.{ package_info.build_root, "build.zig" }),
                 );
             }
         }
@@ -1381,12 +1385,12 @@ const copied_from_zig = struct {
             "--cflags",
             "--libs",
         }, &code, .ignore)) |stdout| stdout else |err| switch (err) {
-            error.ProcessTerminated => return error.PkgConfigCrashed,
-            error.ExecNotSupported => return error.PkgConfigFailed,
-            error.ExitCodeFailure => return error.PkgConfigFailed,
-            error.FileNotFound => return error.PkgConfigNotInstalled,
-            else => return err,
-        };
+                error.ProcessTerminated => return error.PkgConfigCrashed,
+                error.ExecNotSupported => return error.PkgConfigFailed,
+                error.ExitCodeFailure => return error.PkgConfigFailed,
+                error.FileNotFound => return error.PkgConfigNotInstalled,
+                else => return err,
+            };
 
         var zig_args = std.array_list.Managed([]const u8).init(b.allocator);
         defer zig_args.deinit();

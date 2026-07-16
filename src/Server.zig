@@ -486,6 +486,7 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
         }
     }
 
+
     server.status = .initializing;
 
     {
@@ -514,6 +515,18 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
             log.err("failed to read initialization_options: {}", .{err});
         }
     }
+    // // as addWorkspace calls loadDirectoryRecursive, which calls build runners,
+    // // the resolveConfiguration has to be called first, to load necessary data.
+    // // without it, the build runners will not run.
+    // if (request.workspaceFolders) |workspace_folders| {
+    //     for (workspace_folders) |src| {
+    //         const uri = Uri.parse(arena, src.uri) catch |err| switch (err) {
+    //             error.OutOfMemory => return error.OutOfMemory,
+    //             else => return error.InvalidParams,
+    //         };
+    //         try server.addWorkspace(uri);
+    //     }
+    // }
 
     return .{
         .serverInfo = .{
@@ -871,8 +884,6 @@ fn addWorkspace(server: *Server, uri: Uri) error{ Canceled, OutOfMemory }!void {
         });
     }
 
-    try server.document_store.workspace_handler.register(uri, &server.document_store);
-
     const file_count = server.document_store.loadDirectoryRecursive(uri) catch |err| switch (err) {
         error.Canceled, error.OutOfMemory => |e| return e,
         error.UnsupportedScheme => return, // https://github.com/microsoft/language-server-protocol/issues/1264
@@ -889,8 +900,6 @@ fn removeWorkspace(server: *Server, uri: Uri) void {
     for (server.workspaces.items, 0..) |workspace, i| {
         if (workspace.uri.eql(uri)) {
             var removed_workspace = server.workspaces.swapRemove(i);
-
-            server.document_store.workspace_handler.unregister(uri, &server.document_store);
 
             removed_workspace.deinit(server.allocator);
             log.info("removed Workspace Folder: {s}", .{uri.raw});

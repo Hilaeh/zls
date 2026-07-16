@@ -388,6 +388,56 @@ fn toFsPathWithOs(
     return try buf.toOwnedSlice(allocator);
 }
 
+
+/// Converts a Uri to a file system path.
+/// Caller owns the returned memory
+/// returns the number of bytes written
+pub fn toFsPathBuffer(
+    uri: Uri,
+    buffer: []u8,
+) error{ UnsupportedScheme, WriteFailed }![]u8 {
+    return try toFsPathWithOsBuffer(uri, buffer, builtin.os.tag == .windows);
+}
+
+fn toFsPathWithOsBuffer(
+    uri: Uri,
+    buffer: []u8,
+    comptime is_windows: bool,
+) error{ UnsupportedScheme, WriteFailed }![]u8 {
+    const parsed_uri = std.Uri.parse(uri.raw) catch unreachable; // The Uri is guranteed to be valid
+    if (!std.mem.eql(u8, parsed_uri.scheme, "file")) return error.UnsupportedScheme;
+
+    var writer: std.Io.Writer = .fixed(buffer);
+
+    if (is_windows and parsed_uri.host != null) {
+        const host = parsed_uri.host.?;
+        writer.writeAll("\\\\");
+        if (parsed_uri.user) |user| {
+            try user.formatRaw(&writer);
+            if (parsed_uri.password) |password| {
+                writer.writeAll(':');
+                try password.formatRaw(&writer);
+            }
+            writer.writeAll('@');
+        }
+        try host.formatRaw(&writer);
+        if (parsed_uri.port) |port|
+            writer.writeAll(":{d}", .{port});
+    }
+    try parsed_uri.path.formatRaw(&writer);
+
+    if (is_windows and
+        writer.end >= 3 and
+        buffer[0] == '/' and
+        std.ascii.isAlphabetic(buffer[1]) and
+        buffer[2] == ':')
+    {
+        // remove the extra slash
+        @memmove(buffer[0 .. writer.end - 1], buffer[1..writer.end]);
+        return buffer[0..writer.end - 1];
+    }
+    return buffer[0..writer.end];
+}
 test "toFsPath (posix)" {
     const uri: Uri = try .parseWithOs(std.testing.allocator, "file:/foo/main.zig", false);
     defer uri.deinit(std.testing.allocator);

@@ -15,8 +15,12 @@ pub const BuildConfig = struct {
     top_level_steps: []const []const u8,
     available_options: std.json.ArrayHashMap(AvailableOption),
 
+    pub const ImportInfo = struct {
+        path: []const u8,
+        is_dependency: bool,
+    };
     pub const Module = struct {
-        import_table: std.json.ArrayHashMap([]const u8),
+        import_table: std.json.ArrayHashMap(ImportInfo),
         c_macros: []const []const u8,
         include_dirs: []const []const u8,
     };
